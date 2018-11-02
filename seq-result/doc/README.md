@@ -31,7 +31,7 @@ Compare the gene lists identified in del80 background from 2013 data and the cur
 
 In particular, I want to compare:
 
-1. # of genes identified as up-regulated in both experiments
+1. number of genes identified as up-regulated in both experiments
 1. concordance of estimated log2 fold-change
 
 _Did_
