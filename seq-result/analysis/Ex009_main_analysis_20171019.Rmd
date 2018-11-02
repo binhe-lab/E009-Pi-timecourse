@@ -1,0 +1,448 @@
+---
+title: "Ex009_main_analysis"
+author: Bin He
+created: 19 oct 2017
+output: 
+  html_notebook:
+    toc: true
+    toc_float: true
+---
+
+```{r global_options, include=FALSE}
+rm(list=ls()) ### To clear namespace
+library(knitr)
+opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE, fig.path="../output/figure")
+```
+
+## Goal
+
+1. Characterize the **genome-wide** transcriptional response to inorganic phosphate starvation in _C. glabrata_. Compare this to the Pho4-dependent gene induction identified in the _pho80∆_ background that causes constitutive activation of Pho4.
+    
+    > previously I used RNAseq in _pho80∆_ to identify genes induced by Pho4, while measuring Pho4 binding profile under physiological starvation conditions. This dataset will allow me to revisit some of the genes deemed bound but not induced by Pho4 in the previous dataset, to see if they are actually induced under starvation.
+
+1. in addition to identifying the genes that respond to the starvation, but also their kinetics.
+    
+    > this is motivated by Barkai group's Cell Reports study, where they showed that PHO genes in _S. cerevisiae_ were induced in two big waves following starvation. I want to see if similar dynamics can be observed in _C. glabrata_
+   
+## Experiment set up
+
+In Ex009, I performed time-course transcriptome profiling following inorganic phosphate starvation in two genetic background, namely the wild-type and _pho4∆_. The purpose of doing this in _pho4∆_ is to distinguish Pho4-dependent vs Pho4-independent gene induction.
+
+The time-course includes a pre-stress (rich media) condition and a series of post-stress time points. The sampling density on the time axis is denser in the beginning, then gradually becoming sparser, in contrast to the regular interval designed used in Barkai's study. This is so that I can focus on the early time points while restricting the total number of samples I need to collect and process.
+
+The sample sheet is documented [here](../data/sample_sheet/Ex009_experiment_set_up_20171019.csv)
+
+Below is a simple chart to show the design:
+
+| Genotype | Time point  | Replicates | Comment |
+| -------- | :---------- | :--------: | ------- |
+| 80∆      | rich media  | 2          | for consistency check with my previous data |
+| 80∆ 4∆   | rich media  | 2          | for consistency check with my previous data |
+| wt-1     | pre, 20', 30', 45', 60', 90', 120', 150', 180', 240' | 1 | time course for wt  |
+| 4∆-1     | pre, 20', 30', 45', 60', 90', 120', 150', 180', 240' | 1 | time course for 4∆  | 
+| wt-2     | pre, 20', 30', 45', 60',      120',       180', 240' | 1 | biol. repl. for wt-1|
+| 4∆-2     | pre, 20', 30', 45', 60',      120',       180'       | 1 | biol. repl. for 4∆-1| 
+
+
+## Prepare data
+
+```{r load_libraries, message=FALSE}
+require(ggplot2)       ## for plotting
+require(cowplot)       ## for some useful defaults in ggplot2
+require(limma)         ## for differential gene expression analysis
+require(data.table)    ## for fast importing and manipulating data tables
+require(edgeR)         ## for DGEList()
+require(RColorBrewer)  ## for plotting
+require(NMF)           ## for heatmap plot
+require(gplots)        ## for heatmap plot
+require(aroma.light)   ## for exploratory analysis
+source("../code/R_subfunctions_20171026.R")  ## custom defined functions
+```
+
+```{r load_data}
+# raw data count
+raw <- fread("../data/gene_count/Ex009_reads_per_transcript_2017-10-18.txt", key = "gene.names")
+# sample sheet
+sample <- fread("../data/sample_sheet/Ex009_experiment_set_up_20171019.csv")
+sample[,Timepoint:=factor(Timepoint, levels = c("pre","20m","30m","45m","60m","90m","120m","150m","180m","240m","del80"))]
+sample[,Group:=paste(Genotype,Timepoint, sep=".")]
+# rearrange the columns in `raw` according to the samples order in `sample`
+ind <- match( c(sample$Sample, "gene.names"), names(raw) )
+raw <- raw[,ind,with=FALSE]
+# annotation
+anno.file <- fread("../data/annotation/C_glabrata_gene_for_mapping_s02-m07-r04.bed")
+names(anno.file) <- c("Chr","Start","End","GeneID","Not.Use","Strand","GeneName","Type.of.Gene")
+anno <- anno.file[,c("Chr","GeneID","GeneName","Type.of.Gene")]
+setkey(anno, "GeneID")
+cgToSc <- fread("../data/annotation/C_glabrata_CBS138_S_cerevisiae_orthologs.txt")
+names(cgToSc) <- c("cgid","cgname","cgid2","scid","scname","scid2")
+setkey(cgToSc, "cgid")
+```
+
+```{r prepare_data}
+# filter dataset to remove very lowly expressed genes
+# 1. examine the distribution of reads for each gene across all samples, to establish a threshold
+S <- rowSums(raw[,1:40])
+plot(density(log10(S)))
+sprintf("The number of genes with less than 40 total counts across 40 samples, i.e. 1 read per sample on average is %d, and those with less than 100 total counts, or 2.5 reads per sample, is %d", sum(S<=40), sum(S<=100))
+print("Let's try 40 reads as a cutoff for dropping genes with low or no expression")
+
+# 2. filter dataset
+isexpr <- (S <= 40)
+use.genes <- grepl("ncRNA|ORF|pseudogene", anno$Type.of.Gene)
+use <- (!isexpr & use.genes)
+mat <- as.matrix(raw[use, 1:40])
+anno.all <- anno; anno <- anno.all[use]
+
+# 3. write out the filtered table (uncomment if changes are made to the filtering steps above)
+#write.table(as.data.frame(raw[use]), file = paste("../data/gene_count/Ex009_reads_per_transcript_filtered_", Sys.Date(), ".txt", sep = ""), quote = FALSE, row.names = FALSE)
+```
+
+## Exploratary analysis
+
+_Goal_
+
+- visualize the between sample variation in the raw read count distribution, so as to assess the need of normalization and to choose the appropriate method
+- examine variability between technical and biological replicates, and separation between treatment, on an MDS plot
+
+_Reference_
+
+[RUVSeq manual on Bioconductor](http://bioconductor.org/packages/release/bioc/vignettes/RUVSeq/inst/doc/RUVSeq.pdf)
+
+
+### 1. Explore different normalization methods
+
+    **RLE**: log ratio of read count per gene to median read count across sample, plotted as the distribution of the ratios for each gene within a sample. It visualizes two types of variation between samples: first one is the sequencing depth, reflected by the mean postion of the boxes, and the second one the normalized transcriptome variance as compared to the median of all samples, reflected by the width of the boxes.
+
+    Note that the resulting distribution has different meaning from a simple boxplot of the read counts in each sample. In RLE plot, the values represent the deviation of the read count of a gene in that sample from the median of all samples. If the samples are largely made up of 
+
+```{r explore_normalization, fig.width=9, fig.height=3, fig.keep=TRUE}
+# Print sample information
+print(sample[,.(Sample, Strain, Genotype, Timepoint, Replicate)])
+
+# visualize the between sample variation pre-normalization
+print("Non-normalized")
+myPlotRLE(mat, outline=FALSE, ylim= c(-3, 3), cex.axis = 0.8, las = 3)
+title(main = "non-normalized", xlab = "sample", ylab = "log ratio of expression relative to median")
+
+# try upper quantile normalization
+print("Upper-quantile normalized")
+set1 <- myBetweenLaneNormalization(mat, which="upper")
+myPlotRLE(set1, outline=FALSE, ylim=c(-3, 3), cex.axis = 0.8, las = 3)
+title(main = "upperquartile normalized", xlab = "sample", ylab = "log ratio of expression relative to median")
+
+# try full quantile normalization
+print("Full-quantile normalized")
+set2 <- myBetweenLaneNormalization(mat, which="full")
+myPlotRLE(set2, outline=FALSE, ylim=c(-3, 3), cex.axis = 0.8, las = 3)
+title(main = "full quantile normalized", xlab = "sample", ylab = "log ratio of expression relative to median")
+
+# try TMM normalization
+# 1. construct count matrix
+dge <- DGEList( counts = mat, genes = anno )
+# 2. perform TMM normalization
+dge <- calcNormFactors(dge)
+# 3. calculate log transformed, normalized counts
+cpm.o <- cpm( dge, normalized.lib.sizes = FALSE, log = FALSE) # unnormalized
+cpm.n <- cpm( dge, normalized.lib.sizes = TRUE, log = FALSE) # normalized
+myPlotRLE(cpm.o, outline=FALSE, ylim=c(-3, 3), cex.axis = 0.5, las = 3)
+title(main = "library size normalized", xlab = "sample", ylab = "log ratio of expression relative to median")
+myPlotRLE(cpm.n, outline=FALSE, ylim=c(-3, 3), cex.axis = 0.5, las = 3)
+title(main = "TMM normalized", xlab = "sample", ylab = "log ratio of expression relative to median")
+```
+
+Sample S1-6 and S37,38 have larger variance than the rest of the samples. One thing in common about these 8 samples is that they were grown in rich media, although some of the strains are supposed to have PHO activated just as the starved samples are. I suspect the higher variance is a result of the 40 samples being dominated by starved conditions (both wt and _pho4∆_), which may share a general transcriptional profile compared to the high Pi samples. Since RLE compares each sample to the median of all samples, the dominance by starved samples would cause high deviation for the minority samples collected in high Pi. To test this hypothesis, I predict that an RLE plot with 6 high Pi and 6 low Pi samples would look much more similar to each other. And that's what I saw below.
+
+```{r investigate_higher_variance_in_high_Pi_samples}
+myPlotRLE( cpm.n[,c(1:12)], outline=FALSE, ylim=c(-3, 3), cex.axis = 0.5, las = 3)
+title(main = "RLE plot for 6 high Pi and 6 low Pi samples", xlab = "sample", ylab = "log ratio of expression relative to median")
+```
+
+*Conclusion*
+
+- All three methods tried, i.e. TMM, upperquartile and full quantile normalization similarly removed the position differences in the box plots.
+
+- The distribution of log radio of expression is greater for S1-S6, S37 and S38. The reason is because the 40 samples are dominated by starved cells, which probably share a lot of transcriptional changes (independent of Pho4). The way RLE is calculated means that the median value, which is the denominator in the ratio, is largely determined by the majority sample type. Consequently, the minority sample type will show large variances. This does suggest that the assumption of the RLE plot, namely the majority of genes are not differentially expressed, is not satisfied, and that Pi starvation induces a large transcriptional response, most of which are not Pho4-dependent.
+
+- I also looked at other properties of the samples and sequencing stat, such as the amount of RNA extracted, number of PCR cycles used for making the library, total number of reads obtained and number of reads mapped. None suggested quality differences between S1-6, S37, S38 with the rest samples.
+
+
+```{r normalize_data}
+# 1. construct count matrix
+dge <- DGEList( counts = mat, genes = anno )
+# 2. perform TMM normalization
+dge <- calcNormFactors(dge)
+# 3. use TMM to normalize data
+lcpm <- cpm( dge, normalized.lib.sizes = TRUE, log = TRUE, prior.count = 0.5)
+rownames(lcpm) <- anno$GeneID
+```
+
+### 2. MDS plot
+```{r MDS_plot, fig.width=10, fig.height=5, echo=FALSE}
+# the goal here is to perform unsupervised clustering to project the different samples, including biological and technical replicates, on a lower dimention that capture most of the variation
+tp <- factor(sample[match(Sample, colnames(lcpm)), Timepoint])
+gp <- factor(sample[match(Sample, colnames(lcpm)), paste(Genotype, ifelse(Timepoint %in% c("del80","pre"), "happy","stress"), sep=".")])
+col <- brewer.pal(nlevels(gp), name = "Set1")
+layout(matrix(c(1,2),ncol=2))
+plotMDS(lcpm, labels = tp, col = col[gp], dim.plot = c(1,2), top = 500)
+legend("topleft", legend = levels(gp), text.col = col)
+title(main = "Top 500 differentially expressed genes")
+plotMDS(lcpm, labels = tp, col = col[gp], dim.plot = c(1,2), top = 50)
+legend("topleft", legend = levels(gp), text.col = col)
+title(main = "Top 50 differentially expressed genes")
+```
+
+**Conclusion**
+
+- The first dimension (leading logFC dim 1), which explains the most variation, mainly separates the non-stressed samples (including del80.del4) and the stressed ones. The del80.PHO4 sample is only slightly removed from the unstressed ones suggesting that Pho4-dependent gene induction probably represents a rather small fraction of the genes whose expression change upon stress.
+
+- On the left graph, which used top 500 differentially expressed genes (see manual of plotMDS for details), we see that the stressed samples nicely align themselves in the order that largely match their time under stress (from top to bottom: 30'm 45', 60', 90', 120-240'). The del4 and PHO4 samples with matching time points group together, again suggesting that the majority of transcriptional responses after Pi starvation are Pho4-independent.
+
+- I reasoned that the more strongly a gene is induced, the more likely it is under direct Pho4 regulation. Based on this assumption, I used the top 50 genes to construct the MDS plot (right). Here it indeed changed some of the features. Specifically, 
+
+    1. the first dimention still mainly separates the non-stressed from the stressed samples. This time however, it also displays a progression that matches the time under stress. 
+    1. More interestingly, the second dimension now separates the del4 vs PHO4-wt samples. Moreover, it unexpected spreads the different time point samples, but only for del4 ones. The meaning of this is yet unclear.
+
+### 3. Single gene analysis
+
+_Goal_
+
+- Visualize a few known Pho4 target genes and compare them to my expectation.
+
+_Approach_
+
+I wrote a sub-function in a separate file and source it here.
+
+```{r single_gene_analysis, fig.width=12, fig.height=10}
+# Gene lists based on He et al 2017 eLife
+# 1. conserved (all PHO related) targets with S. cerevisiae
+set1 <- c("CAGL0B02475g", "CAGL0A01243g", "CAGL0L05456g", "CAGL0C02321g", "CAGL0G06952g", "CAGL0L06622g", "CAGL0M12705g", "CAGL0F02145g", "CAGL0J07040g", "CAGL0K12034g") 
+# 2. Cg. specific PHO related
+set1.1 <- c("CAGL0K07546g", "CAGL0M11660g", "CAGL0B02453g", "CAGL0F02387g", "CAGL0K07524g", "CAGL0M12430g") 
+# 3. Sc. specific PHO related
+set1.2 <- c("CAGL0M09823g","CAGL0K04939g","CAGL0H07359g","CAGL0L04422g","CAGL0F02035g","CAGL0H01815g") 
+# 4. other stress related
+set2 <- c("CAGL0E05588g", "CAGL0C04741g", "CAGL0M13189g", "CAGL0E05566g", "CAGL0E05984g", "CAGL0M11660g", "CAGL0G01540g", "CAGL0K10604g", "CAGL0J04202g", "CAGL0L06644g", "CAGL0K10164g", "CAGL0M06325g") 
+# 5. cell wall and adhesion
+set3 <- c("CAGL0J04202g", "CAGL0M07634g", "CAGL0M12430g", "CAGL0E05940g", "CAGL0K10164g", "CAGL0L06424g", "CAGL0L07502g", "CAGL0M08514g", "CAGL0J06050g", "CAGL0F00649g", "CAGL0M06325g", "CAGL0C04741g", "CAGL0B02926g", "CAGL0B02970g", "CAGL0I00726g") 
+
+print( cgToSc[set1, .(cgid, cgname, scid,scname)])
+myGenePlot(genes = set1)
+
+print( cgToSc[set1.1, .(cgid, cgname, scid,scname)])
+myGenePlot(genes = set1.1)
+
+print( cgToSc[set2, .(cgid, cgname, scid,scname)])
+myGenePlot(genes = set2)
+
+print( cgToSc[set3, .(cgid, cgname, scid,scname)])
+myGenePlot(genes = set3)
+```
+
+_Conclusion_
+
+- For the conserved PHO genes between Sc and Cg, all showed strong Pho4-dependent induction.
+
+- For the Cg-specific PHO genes related to phosphate homeostasis, all except RHR2 showed Pho4-dependent induction.
+
+- For the other stress associated genes, while all of them were induced during phosphate starvation, all except RTT107 were induced regardless of the presence or absence of Pho4. There are two possible explanations:
+
+    1. They are false positives from my earlier attempt to identify CgPho4-dependent genes.
+    1. There are redundant regulation, i.e. other TFs may induce these genes independent of Pho4. If true, it would be very interesting to understand what those factors are and what is the logic gate that integrates the different regulatory factors at the level of the promoter.
+    
+    Another gene worth noting is M11660g, whose best-hit in _S. cerevisiae_ is _GPP1_. It encodes a DL-glycerol-3-phosphate phosphatase. SGD annotation suggests that it is involved in glycerol biosynthesis, and is induced upon osmotic stress. Xu's 2011 paper identified _GPP1_ as a ScPho4 targets, although binding of ScPho4 at its promoter is rather weak. In _C. glabrata_, my ChIP-exo showed very strong signals of binding, and more than 10 fold induction in a Pho4-dependent manner. Therefore, while the evidence for _GPP1_ being a target of ScPho4 is relatively weak, the counterpart (not sure if it is a true homolog) in _C. glabrata_ appears to be Pho4-dependent. However, the results here suggest that Pho4 is not the only activator for the gene. Since the RNA-seq was done during a short time window after phosphate starvation, it is unlikely that the nature of the stress has changed due to linked metabolism network. So any Pho4-dependent induction has to come as a direct result of phosphate starvation.
+    
+- The other remification of this analysis is how I should go forward to validate CgPho4's targets identified previously. I realized that 
+
+    1. the starvation time course analyzed here is not conclusive about the involvement of Pho4 in the induction of the gene in question. Rather, it tests if Pho4 is the _sole_ inducer of the gene under phosphate starvation.
+    
+    1. when doing binding site ablation in order to add a third piece of evidence for a direct regulatory relationship, the experiment should be done under both starvation and in the _pho80∆_ background so as to assess the sufficiency and necessity of Pho4 in the gene's induction. 
+
+## Compare with 2013 data ( _pho80∆_ )
+
+_Goal_
+
+Check if the gene list under pho80∆ background in this experiment is consistent with previous results.
+
+_Steps_
+
+1. Load raw counts from previous result.
+1. Extract the subset of data to be used.
+1. Filter the data using the same gene list as in this analysis.
+1. Normalize the data using the same method, but separately for the 2013 data.
+1. Apply LIMMA-voom to identify top gene lists
+
+_Analyses_
+
+```{r prepare_2013_data, fig.width=10, fig.height=5}
+# I. Load data
+raw13 <- fread("../data/gene_count/2013_Cgla_reads_per_transcript_2016-02-21.txt") # checked to make sure that the gene names align with raw
+sample13 <- fread("../data/sample_sheet/2013_CglaRNAseq_sample_info.csv")
+# what I need is sample N1, N2, O1, O2, which correspond to S37, S38, S1, S2
+# also use the same gene filtering I used for the current analysis
+mat13 <- as.matrix( raw13[use, .(N1,N2,O1,O2)] )
+
+# II. now combine the two experiments into one
+mat.d80 <- cbind( mat[,c("S37","S38","S1","S2")], mat13 )
+# and create the appropriate sample sheet
+sample.d80 <- read.table(strip.white = TRUE, text = "Sample, Pho4, Exp
+                         S37, Cgla4, 2017
+                         S38, Cgla4, 2017
+                         S1, del4, 2017
+                         S2, del4, 2017
+                         N1, Cgla4, 2013
+                         N2, Cgla4, 2013
+                         O1, del4, 2013
+                         O2, del4, 2013", sep = ",", head = TRUE )
+
+# III. apply TMM normalization
+# 0. visualize the between sample unwanted variation using Relative Log Expression (RLE)
+oldpar <- par( mfcol = c(1,2) )
+myPlotRLE( mat.d80, outline = FALSE, ylim = c(-2.3,2.3), las = 2, main = "RLE plot before normalization" )
+# 1. construct count matrix
+dge.d80 <- DGEList( counts = mat.d80, genes = anno )
+# 2. perform TMM normalization
+dge.d80 <- calcNormFactors(dge.d80)
+# 3. use TMM to normalize data
+cpm.d80 <- cpm( dge.d80, normalized.lib.sizes = TRUE, log = FALSE, prior.count = 0.5)
+# 4. examine the RLE plot after normalization
+myPlotRLE( cpm.d80, outline = FALSE, ylim = c(-2.3,2.3), las = 2, main = "RLE plot after normalization" )
+# 5. finish the normalization with log transformation
+lcpm.d80 <- cpm( dge.d80, normalized.lib.sizes = TRUE, log = TRUE, prior.count = 0.5)
+rownames(lcpm.d80) <- anno$GeneID
+
+# IV. bird-eye view of similarity between samples
+plotMDS( lcpm.d80, top = 500, main = "MDS plot with top 500 DE genes")
+plotMDS( lcpm.d80, top = 50,  main = "MDS plot with top 50  DE genes")
+par( oldpar )
+```
+
+```{r del80_DE_analysis, fig.height=10, fig.width=10, fig.keep=TRUE}
+layout(matrix(c(1,2,0,3), ncol = 2))
+# the goal here is to perform differential gene expression analysis, separately for 2013 and 2017 data
+# create design matrix
+grp <- with(sample.d80, paste(Pho4,Exp,sep="."))
+dsgn.d80 <- model.matrix(~0+grp)
+colnames(dsgn.d80) <- gsub("grp","",colnames(dsgn.d80))
+# voom transformation to account for variance-mean dependence
+v.dge.d80 <- voom(dge.d80, design = dsgn.d80, plot = TRUE)
+# v.dge.d80 <- voomWithQualityWeights(dge.d80, design = dsgn.d80, plot = TRUE) # incorporate sample weights
+
+# LIMMA fit
+fit.d80 <- lmFit(v.dge.d80, design = dsgn.d80) # this automatically extracts the weights in the v.dge.d80 and uses it to perform a weighted linear regression
+
+# make contrasts
+contr.d80 <- makeContrasts(
+  Pho4.13 = Cgla4.2013 - del4.2013,
+  Pho4.17 = Cgla4.2017 - del4.2017,
+  Cgla4.13vs17 = Cgla4.2013 - Cgla4.2017,
+  del4.13vs17 = del4.2013 - del4.2017,
+  levels  = dsgn.d80
+)
+fit.d80 <- contrasts.fit(fit.d80, contrasts = contr.d80)
+fit.d80 <- eBayes( fit.d80 )
+sig.d80 <- decideTests( fit.d80, method = "global", lfc = 1 ) # only include genes more than 2 fold induced
+choose <- rowSums(sig.d80[,1:2]) >= 1 # select genes that are deemed significant in at least one exp.
+test <- coef(fit.d80)[choose,]
+lm <- lm(test[,"Pho4.13"]~test[,"Pho4.17"])
+
+# plot to compare the two results
+plot(coef(fit.d80)[choose,1:2], cex = 0.75, pch = 19, col = rgb(0,0,0,0.6), xlab = "2013", ylab = "2017", main = "log2 fold-change", sub = paste("Pearson's r = ", round(cor(test[,1],test[,2]),2) ,sep="") )
+
+# plot the overlap between the two list
+vennDiagram( sig.d80[,1:2], include = "up", circle.col = c("turquoise","salmon") )
+
+# plot heatmap
+sprintf("A totle of %d genes were selected because they were significantly induced by more than 2 fold in at least one of the two experiments.", sum(choose))
+mycol <- colorpanel(1000,"blue","black","yellow")
+heatmap.2(v.dge.d80$E[choose,], scale="row",Rowv = TRUE,
+   labRow=NA, labCol=colnames(v.dge.d80),
+   col=mycol, trace="none", density.info="none", 
+   margin=c(8,6), lhei=c(2,10), dendrogram="none")
+
+# Mean-difference plots to visualize the differences
+layout(matrix(c(1,3,2,4), ncol = 2))
+name.contr.d80 <- c("Pho4-dependent gene induction, 2013",
+                    "Pho4-dependent gene induction, 2017",
+                    "DE between 2013 and 2017 with Pho4",
+                    "DE between 2013 and 2017 w/o Pho4")
+for( i in 1:4 ){
+  plotMD(fit.d80, coef = i, status = sig.d80[,i], main = name.contr.d80[i], ylim = c(-10,10))
+}
+```
+
+_Conclusion_ 
+
+Overall the two experiments are fairly consistent with each other, with 2013 data showing less down-regulated genes in _80∆_ background, which I consider as a sign for better quality.
+
+```{r combine_2017_2013_d80_data}
+print(topTable( fit.d80, coef = c(1,2), n = 50 )) # by specifying coef=c(1,2), I'm including the estimates of Pho4 effect in both 2017 and 2013 data. topTable will perform a F-test by calling topTalbeF to identify genes that are differentially expressed in at least one of the two comparisons, ranked by the overall evidence of DE.
+
+# same procedure as the analysis above, but pooling 2013 and 2017 datasets
+grp2 <- sample.d80$Pho4
+dsgn.d80.2 <- model.matrix(~0+grp2)
+colnames(dsgn.d80.2) <- gsub("grp2","",colnames(dsgn.d80.2))
+# voom transformation to account for variance-mean dependence
+v.dge.d80.2 <- voom(dge.d80, design = dsgn.d80.2, plot = FALSE)
+
+# LIMMA fit
+fit.d80.2 <- lmFit(v.dge.d80.2, design = dsgn.d80.2) # this automatically extracts the weights in the v.dge.d80 and uses it to perform a weighted linear regression
+
+# make contrasts
+contr.d80.2 <- makeContrasts(
+  Pho4 = Cgla4 - del4,
+  levels  = dsgn.d80.2
+)
+fit.d80.2 <- contrasts.fit(fit.d80.2, contrasts = contr.d80.2)
+fit.d80.2 <- eBayes( fit.d80.2 )
+sig.d80.2 <- decideTests( fit.d80.2, method = "global", lfc = 1 ) # only include genes more than 2 fold induced
+
+topTable(fit.d80.2, n = 50)
+```
+
+
+
+## Analyze time-course data
+
+### First timepoint
+
+_Questions_
+
+1. How many genes are turned on at 20'? (set1)
+1. How many of them are _exclusively_ dependent on Pho4, meaning that the gene induction is abolished in _pho4∆_? (set 2)
+1. How much does set 2 overlap with the set identified in _pho80∆_?
+
+_Analysis_
+
+```{r first_time_point}
+# 0. Prepare dataset
+
+#  `dge` contains the data, including the count matrix, the sample normalization factors and gene names
+#  `sample` contains the experimental design, including the genotype, pre or post stress (time points if latter)
+#  I've already made one variable that combines both genotype and stress conditions
+#  note that I included the d80 data in this analysis
+
+dsgn <- model.matrix(~0+sample$Group)
+colnames(dsgn) <- gsub("sample$Group","",colnames(dsgn),fixed=TRUE)
+# voom transformation to account for variance-mean dependence
+v.dge <- voom(dge, design = dsgn, plot = FALSE)
+
+# 1. LIMMA fit the whole dataset
+fit <- lmFit(v.dge, design = dsgn) # this automatically extracts the weights in the v.dge and uses it to perform a weighted linear regression
+
+# 2. make contrasts
+contr.first <- makeContrasts(
+  d80 = wt.del80 - del4.del80,
+  wt.t20 = wt.20m - wt.pre,
+  del4.t20 = del4.20m - del4.pre,
+  diff.t20 = (wt.20m-wt.pre) - (del4.20m-del4.pre),
+  levels  = dsgn
+)
+
+fit.first <- contrasts.fit(fit, contrasts = contr.first)
+fit.first <- eBayes( fit.first )
+sig <- decideTests( fit.first, method = "separate", lfc = 1 ) # only include genes more than 2 fold induced
+
+# how many genes are differentially expressed 20 min after starvation?
+topTable( fit.first, coef = "diff.t20", n = 50 )
+```
