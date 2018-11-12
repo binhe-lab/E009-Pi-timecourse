@@ -8,4 +8,4 @@
 ## 5595 objects, 41 variables
 
 > sample <- fread("Ex009_experiment_set_up_20171019.csv")
-## 40 objects, 60 variables
+## 40 objects, 6 variables
