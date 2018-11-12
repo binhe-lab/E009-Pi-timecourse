@@ -1,2 +1,8 @@
 ##how to install package
 ##install.packages("packagename")
+
+
+> path <- "C:\\Program Files\\R\\R-3.5.1"
+> raw <- fread("Ex009_reads_per_transcript_2017-10-18.txt", key="gene.names")
+> View(raw)
+##5595 objects, 41 variables
