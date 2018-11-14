@@ -9,3 +9,8 @@
 
 > sample <- fread("Ex009_experiment_set_up_20171019.csv")
 ## 40 objects, 6 variables
+
+## limma
+source("http://www.bioconductor.org/biocLite.R")
+biocLite("limma")
+help(package=limma) ## userguide in R
