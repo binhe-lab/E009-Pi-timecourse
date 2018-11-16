@@ -2,12 +2,9 @@
 ##install.packages("packagename")
 
 
-> path <- "C:\\Program Files\\R\\R-3.5.1"
-> raw <- fread("Ex009_reads_per_transcript_2017-10-18.txt", key="gene.names")
-> View(raw)
 ## 5595 objects, 41 variables
 
-> sample <- fread("Ex009_experiment_set_up_20171019.csv")
+sample <- fread("Ex009_experiment_set_up_20171019.csv")
 ## 40 objects, 6 variables
 
 ## limma
