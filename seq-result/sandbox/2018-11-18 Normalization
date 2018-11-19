@@ -23,6 +23,8 @@ plotMDS(y) ##Plot samples on a two-dimensional scatterplot for any data object t
 ## assumption: 1,library size between samples is not variable;2,sequencing depth between samples is consistent
 logCPM<-cpm(y,log = TRUE,prior.count=2) ## compute counts per million(CPM), log = TRUE then log2 values are returned, in this case, u need to set prior.count to avoid taking log of zero and damp down the variance of logarithms in low counts.
 z<-rnorm(5595)
+
+## need to design a matrix before fit them in linear model
 fit<-lm.fit(logCPM,z) ## Questions: what is the matrix z here, I know we shoud have the same number of row as logCPM, but use what to fit linear model?
 
 fit<-eBayes(fit, trend = TRUE)
