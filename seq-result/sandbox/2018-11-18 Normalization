@@ -1,0 +1,19 @@
+library(limma)
+library(edgeR)
+
+1# Input raw data
+rawdata<-read.delim("Ex009.txt", check.names = FALSE, stringsAsFactors = FALSE)  ## for the logical arguments, space are needed
+head(rawdata, n=3L) ## view first 3 rows of data
+tail(rawdata, n=5L) ## view last 5 rows of data
+
+y<-DGEList(count=rawdata[,1:4],genes=rawdata[,5]) ##small parentheses means function, [,]means lines or rows of matrix 
+
+2# Normalization
+
+y<-calcNormFactors(y) ##TMM normalization, based on the assumption that the majority of genes are not DEGs, method = c("TMM","RLE","upperquartile")
+## The leading log-fold-change is the average (root-mean-square) of the largest absolute log-foldchanges between each pair of samples.
+
+y$samples 
+y$counts
+y$genes
+plotMDS(y) ##Plot samples on a two-dimensional scatterplot for any data object that can be coerced to a matrix, MDS:multi-dimentional scaling, 
