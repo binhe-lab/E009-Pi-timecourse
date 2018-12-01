@@ -1,0 +1,160 @@
+---
+title: "2018-11-25 20min"
+output: html_document
+---
+
+```{r}
+##source("http://www.bioconductor.org/biocLite.R")
+##biocLite("NMF")
+##biocLite("aroma.light")
+library(limma)
+library(edgeR)
+require(hexbin)
+require(ggplot2)       ## for plotting
+require(data.table)    ## for fast importing and manipulating data tables
+require(cowplot)       ## for some useful defaults in ggplot2
+require(RColorBrewer)  ## for plotting
+require(gplots)        ## for heatmap plot
+library(NMF)           ## for heatmap plot
+library(aroma.light)   ## for exploratory analysis
+```
+
+
+```{r}
+1# Input raw data
+rawdata <- fread("../sandbox/Ex009_reads_per_transcript_2017-10-18.txt", check.names = FALSE, stringsAsFactors = FALSE)  ## for the logical arguments, space are needed
+
+#head(rawdata, n=3L) ## view first 3 rows of data
+#tail(rawdata, n=5L) ## view last 5 rows of data
+
+2# coerce columns to do DEG analysis
+pre <- as.data.frame.matrix(rawdata[,34:40])
+treated <- as.data.frame.matrix(rawdata[,1])
+genename <- as.data.frame.matrix(rawdata[,41])
+trial <- cbind(genename,pre,treated)
+write.table(trial,file = "Ex009-20m-wtdel4.txt",sep="\t",row.names=FALSE, quote=FALSE) ## still don't know whether I need sep="\t" here, quote = FALSE means nothing is quoted
+```
+
+```{r}
+3# normalization
+rawdata <- fread("../sandbox/Ex009-20m-wtdel4.txt", check.names = FALSE, stringsAsFactors = FALSE)
+y<-DGEList(counts=rawdata[,2:9],genes=rawdata[,1])##small parentheses means function, [,]means lines or rows of matrix ##DGEList() Creates a DGEList object from a table of counts (rows=features, columns=samples), group indicator for each column, library size (optional) and a table of feature annotation (optional).
+y<-calcNormFactors(y) ##TMM normalization, based on the assumption that the majority of genes are not DEGs, calcNormFactors() Calculate normalization factors to scale the raw library sizes.
+plotMDS(y)##Plot samples on a two-dimensional scatterplot so that distances on the plot approximate the typical log2 fold changes between the samples.
+## calculate log transformed, normalized count
+cpm.o <- cpm( y, normalized.lib.sizes = FALSE, log = FALSE) # unnormalized
+cpm.o1 <- cpm( y, normalized.lib.sizes = FALSE, log = TRUE) # unnormalized, log transformed
+cpm.n1 <- cpm(y,normalized.lib.sizes = TRUE,log= FALSE)#normalized
+cpm.n <- cpm(y,normalized.lib.sizes = TRUE,log= TRUE, prior.count=0.5)#normalized, log transformed
+boxplot(cpm.o, outline= F)
+boxplot(cpm.o1, col="blue",outline= F)
+boxplot(cpm.n1, col="red",outline = F)
+boxplot(cpm.n, col="green",outline = F)
+cpm.n <- cbind(genename,cpm.n)
+cpm.n1 <- cbind(genename,cpm.n1)
+write.table(cpm.n1,file="TMMnorm-20min-wtdel4-nolog.txt",row.names=FALSE,sep="\t",quote=F) #normalized
+write.table(cpm.n,file="TMMnorm-20min-wtdel4.txt",row.names=FALSE,sep="\t",quote=F) #normalized, log transformed
+```
+
+```{r}
+4## create design matrix
+eset <- read.table("../sandbox/TMMnorm-20min-wtdel4.txt", sep="\t",header = TRUE,row.names=1) ## why we need sep="\t",rownames=1 whether we have the first column for our row names, rather than included into the datafram, which could be no numeric.
+sample.d20 <- read.table(text="Sample,Genotype,Timepoint
+                         S3,wt,pre
+                         S4,wt,pre
+                         S5,del4,pre
+                         S6,del4,pre
+                         S7,wt,20min
+                         S8,wt,20min,
+                         S9,del4,20min
+                         S10,del4,20min",sep =",",header =TRUE)
+condition <- with(sample.d20,paste(Genotype,Timepoint,sep=".")) ## with(data,expr) construct an environment/list/dataframe, argument expr: expression to evaluate
+dsgn.d20 <- model.matrix(~0+condition)
+colnames(dsgn.d20) <- gsub("condition","",colnames(dsgn.d20))
+contrast.matrix <-makeContrasts(
+  wtvsdel4.pre = wt.pre - del4.pre,
+  wtvsdel4.20min = wt.20min - del4.20min,
+  prevs20min.wt = wt.pre - wt.20min,
+  prevs20min.del4 = del4.pre - del4.20min,
+  levels=dsgn.d20)
+## makeContrasts(..., contrasts=NULL, levels) 
+##Arguments
+##...	
+##expressions, or character strings which can be parsed to expressions, specifying contrasts
+##contrasts=:	character vector specifying contrasts
+##levels character vector or factor giving the names of the parameters of which contrasts are desired, or a design matrix or other object with the parameter names as column names.
+
+fit <- lmFit(eset,dsgn.d20)
+fit1 <- contrasts.fit(fit,contrast.matrix)
+##Given a linear model fit to microarray data, compute estimated coefficients and standard errors for a given set of contrasts.
+##Usage
+##contrasts.fit(fit, contrasts=NULL, coefficients=NULL)
+fit2 <- eBayes(fit1)
+sig.d20 <- decideTests( fit2, method = "global", lfc = 1 ) # only include genes more than 2 fold induced
+choose <- rowSums(sig.d20[,1:2]) >= 1 # select genes that are deemed significant in at least one exp.
+test <- coef(fit2)[choose,]
+
+5# plot the overlap/Venndiagram between the lists
+pdf(file="pre-20m-up.pdf",width = 15, height = 7.5)
+vennDiagram( fit2[,1:4], include = "up", circle.col = c("turquoise","salmon","orange","blue") )
+dev.off()
+pdf(file="pre-20m-down.pdf",width = 15, height = 7.5)
+vennDiagram( fit2[,1:4], include = "down", circle.col = c("turquoise","salmon","orange","blue") )
+dev.off()
+
+write.table(fit2,file="probeid.Foldchange-pre20min-wtvsdel4.txt",sep='\t',quote=F,row.names=F)
+```
+
+
+```{r}
+# 6.sreening diff probeid
+dif2<-topTable(fit2,coef="Tre20min-Pre",n=nrow(fit2),lfc=log2(4),adjust="BH")## Extract a table of the top-ranked genes from a linear model fit. lcf: minimum absolute log2-fold-change required. topTable and topTableF include only genes with (at least one) absolute log-fold-changes greater than lfc.
+dif3<-dif2[dif2[,"adj.P.Val"]<0.05,]
+dif4<-dif2[dif2[,"P.Value"]<0.05,]
+genesymbol3<-rownames(dif3)
+genesymbol4<-rownames(dif4)
+dif3<-cbind(genesymbol3,dif3)
+dif4<-cbind(genesymbol4,dif4)
+write.table(dif3,file="diff.probeid.20min-FDR-adj.p0.05.txt",sep='\t',quote=F,row.names=F)
+write.table(dif4,file="diff.probeid.20min-FDR-p0.05.txt",sep='\t',quote=F,row.names=F)
+
+# 7.exp for diff probeid
+dif3$genesymbol<-rownames(dif3)
+dif4$genesymbol<-rownames(dif4)
+loc3<-match(dif3$genesymbol,rownames(eset))
+loc4<-match(dif4$genesymbol,rownames(eset))
+DEG_exp3<-eset[loc3,]
+DEG_exp4<-eset[loc4,]
+genesymbol3<-rownames(DEG_exp3)
+genesymbol4<-rownames(DEG_exp4)
+DEG_exp3<-cbind(genesymbol3,DEG_exp3)
+DEG_exp4<-cbind(genesymbol4,DEG_exp4)
+write.table(DEG_exp3,file="probeid.20min-FDR-adj.p0.05.exprs.txt",sep='\t',quote=F,row.names=F)
+write.table(DEG_exp4,file="probeid.20min-FDR-p0.05.exprs.txt",sep='\t',quote=F,row.names=F)
+```
+
+
+```{r}
+##8. plot pheatmap
+#source("http://www.bioconductor.org/biocLite.R")
+#biocLite("pheatmap")
+library(pheatmap)
+DEG_exp<-read.table("probeid.20min-FDR-adj.p0.05.exprs.txt",
+                    sep='\t',header=T,row.names=1)
+pdf(file="pheatmap-20min-adjp0.05.pdf",width=50,height=25)
+pheatmap(DEG_exp,
+         color=colorRampPalette(c("blue","white","orange"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="row",
+         border_color=NA,cluster_col = FALSE)
+dev.off()
+DEG_exp2<-read.table("probeid.20min-FDR-p0.05.exprs.txt",
+                    sep='\t',header=T,row.names=1)
+pdf(file="pheatmap-20min-p0.05.pdf",width=50,height=25)
+pheatmap(DEG_exp2,
+         color=colorRampPalette(c("blue","white","orange"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="row",
+         border_color=NA,cluster_col = FALSE)
+dev.off()
+```
