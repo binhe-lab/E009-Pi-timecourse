@@ -1,0 +1,472 @@
+---
+title: "2018-11-25 20min"
+output: html_document
+---
+
+---
+## Overall goal
+1. Identify the list of genes up- and down- regulated upon phosphate starvation
+2. Separate these genes by their induction kinetics to early and late group
+3. Identify the subset of them that are Pho4-dependent
+4. Compare the Pho4-dependent list of genes to previous results based on _pho80??_ background, and discuss any discrepancies
+---
+
+---
+## 1. Identify the up- and down- regulated genes list upon phosphate starvation
+We have a timecourse dataset of wt C.glabrata under phosphate starvation from 20min to 240min. In order to probe the overall sets of genes that can be regulated (either up- or down- regulated) upon phosphate starvation, we need to compare wt C.glabrata strains of distinct time frame of phosphate-depletion with untreated wt C.glabrata strains.
+
+## 1.1 Experiment set-up
+Experimental group: wt C.glabrata Phosphate-starvation (20min to 240min)
+Control group: wt C.glabrata pre (untreated)
+
+| Experimental group | Control Group | Comment |
+| -------- | :---------- | :--------: | ------- |
+| wt 20'  | wt pre  | 20 min up- and down- regulated genes upon phosphate starvation |
+| wt 30'  | wt pre  | 30 min up- and down- regulated genes upon phosphate starvation |
+| wt 45'  | wt pre  | 45 min up- and down- regulated genes upon phosphate starvation |
+| wt 60'  | wt pre  | 60 min up- and down- regulated genes upon phosphate starvation |
+| wt 90'  | wt pre  | 90 min up- and down- regulated genes upon phosphate starvation |
+| wt 120' | wt pre  | 120 min up- and down- regulated genes upon phosphate starvation |
+| wt 150' | wt pre  | 150 min up- and down- regulated genes upon phosphate starvation |
+| wt 180' | wt pre  | 180 min up- and down- regulated genes upon phosphate starvation |
+| wt 240' | wt pre  | 240 min up- and down- regulated genes upon phosphate starvation | 
+---
+
+## Prepare data
+
+```{r}
+source("http://www.bioconductor.org/biocLite.R")
+biocLite("VennDiagram")
+biocLite("pheatmap")
+##biocLite("NMF")
+##biocLite("aroma.light")
+library(limma)
+library(edgeR)
+require(hexbin)
+require(ggplot2)       ## for plotting
+require(data.table)    ## for fast importing and manipulating data tables
+require(cowplot)       ## for some useful defaults in ggplot2
+require(RColorBrewer)  ## for plotting
+require(gplots)        ## for heatmap plot
+library(NMF)           ## for heatmap plot
+library(aroma.light)   ## for exploratory analysis
+library(knitr)
+library(hexbin)
+library(VennDiagram)
+library(pheatmap)
+```
+
+
+```{r}
+1# Input raw data
+raw <- fread("../sandbox/Ex009_reads_per_transcript_2017-10-18.txt", check.names = FALSE, stringsAsFactors = FALSE)  ## for the logical arguments, space are needed
+
+# annotation
+anno.file <- fread("../data/annotation/C_glabrata_gene_for_mapping_s02-m07-r04.bed")
+names(anno.file) <- c("Chr","Start","End","GeneID","Not.Use","Strand","GeneName","Type.of.Gene")
+anno <- anno.file[,c("Chr","GeneID","GeneName","Type.of.Gene")]
+setkey(anno, "GeneID")
+cgToSc <- fread("../data/annotation/C_glabrata_CBS138_S_cerevisiae_orthologs.txt")
+names(cgToSc) <- c("cgid","cgname","cgid2","scid","scname","scid2")
+setkey(cgToSc, "cgid")
+
+# filter dataset to remove very lowly expressed genes
+# 1. examine the distribution of reads for each gene across all samples, to establish a threshold
+S <- rowSums(raw[,1:40])
+plot(density(log10(S)))
+sprintf("The number of genes with less than 40 total counts across 40 samples, i.e. 1 read per sample on average is %d, and those with less than 100 total counts, or 2.5 reads per sample, is %d", sum(S<=40), sum(S<=100))
+print("Let's try 40 reads as a cutoff for dropping genes with low or no expression")
+
+## filter dataset
+isexpr <- (S <= 40)
+use.genes <- grepl("ncRNA|ORF|pseudogene", anno$Type.of.Gene)
+use <- (!isexpr & use.genes)
+mat <- as.matrix(raw[use, 1:40])
+anno.all <- anno; anno <- anno.all[use]
+
+## write out the filtered table (uncomment if changes are made to the filtering steps above)
+##write.table(as.data.frame(raw[use]), file = paste("../sandbox/Ex009_reads_per_transcript_filtered_", Sys.Date(), ".txt", sep = ""), quote = FALSE, row.names = FALSE)
+
+rawdata <- fread("../sandbox/Ex009_reads_per_transcript_filtered_2018-12-02.txt", check.names = FALSE, stringsAsFactors = FALSE)
+```
+
+
+```{r}
+2# coerce columns to do differentially expressed genes (DEG) analysis
+untreated <- as.data.frame.matrix(rawdata[,34:35])
+tre.20min <- as.data.frame.matrix(rawdata[,38:39])
+tre.30min <- as.data.frame.matrix(rawdata[,2:3])
+tre.45min <- as.data.frame.matrix(rawdata[,7:8])
+tre.60min <- as.data.frame.matrix(rawdata[,11])
+tre.60min2 <- as.data.frame.matrix(rawdata[,13])
+tre.60min <- cbind(tre.60min,tre.60min2)
+tre.90min <- as.data.frame.matrix(rawdata[,17])
+tre.120min <- as.data.frame.matrix(rawdata[,19:20])
+tre.150min <- as.data.frame.matrix(rawdata[,23])
+tre.180min <- as.data.frame.matrix(rawdata[,26:27])
+tre.240min <- as.data.frame.matrix(rawdata[,30])
+
+
+genename <- as.data.frame.matrix(rawdata[,41])
+trial <- cbind(genename,untreated,tre.20min,tre.30min,tre.45min,tre.60min,tre.90min,tre.120min,tre.150min,tre.180min,tre.240min)
+write.table(trial,file = "Ex009-wt.txt",sep="\t",row.names=FALSE, quote=FALSE) ## still don't know whether I need sep="\t" here, quote = FALSE means nothing is quoted
+
+
+```
+
+```{r}
+3# normalization
+rawdata <- fread("../sandbox/Ex009-wt.txt", check.names = FALSE, stringsAsFactors = FALSE)
+y<-DGEList(counts=rawdata[,2:18],genes= anno$GeneID)## [,]means lines or rows of matrix ##DGEList() Creates a DGEList object from a table of counts (rows=features, columns=samples), group indicator for each column, library size (optional) and a table of feature annotation (optional).
+y<-calcNormFactors(y) ##TMM normalization, based on the assumption that the majority of genes are not DEGs, calcNormFactors() Calculate normalization factors to scale the raw library sizes.
+plotMDS(y)##Plot samples on a two-dimensional scatterplot so that distances on the plot approximate the typical log2 fold changes between the samples.
+## calculate log transformed, normalized count
+cpm.o <- cpm( y, normalized.lib.sizes = FALSE, log = FALSE) # unnormalized
+cpm.o1 <- cpm( y, normalized.lib.sizes = FALSE, log = TRUE) # unnormalized, log transformed
+cpm.n1 <- cpm(y,normalized.lib.sizes = TRUE,log= FALSE)#normalized
+cpm.n <- cpm(y,normalized.lib.sizes = TRUE,log= TRUE, prior.count=0.5)#normalized, log transformed
+boxplot(cpm.o, outline= F)
+boxplot(cpm.o1, col="blue",outline= F)
+boxplot(cpm.n1, col="red",outline = F)
+boxplot(cpm.n, col="green",outline = F)
+cpm.n <- cbind(genename,cpm.n)
+cpm.n1 <- cbind(genename,cpm.n1)
+write.table(cpm.n1,file="TMMnorm-wt-nonlog.txt",row.names=FALSE,sep="\t",quote=F) #normalized
+write.table(cpm.n,file="TMMnorm-wt.txt",row.names=FALSE,sep="\t",quote=F) #normalized, log transformed
+```
+
+```{r}
+4## create design matrix
+eset <- read.table("../sandbox/TMMnorm-wt.txt", sep="\t",header = TRUE,row.names=1) ## why we need sep="\t",rownames=1 whether we have the first column for our row names, rather than included into the datafram, which could be no numeric.
+eset.pre <- eset[,1:2]
+eset.20m <- eset[,3:4]
+eset.30m <- eset[,5:6]
+eset.45m <- eset[,7:8]
+eset.60m <- eset[,9:10]
+eset.90m <- eset[,11]
+eset.120m <- eset[,12:13]
+eset.150m <- eset[,14]
+eset.180m <- eset[,15:16]
+eset.240m <- eset[,17]
+
+
+sample.wt <- read.table(text="Sample,Genotype,Timepoint
+                         S3,wt,pre
+                         S4,wt,pre
+                         S7,wt,tre20m
+                         s8,wt,tre20m
+                         s11,wt,tre30m
+                         s12,wt,tre30m
+                         s15,wt,tre45m
+                         s16,wt,tre45m
+                         s19,wt,tre60m
+                         s20,wt,tre60m
+                         s23,wt,tre90m
+                         s25,wt,tre120m
+                         s26,wt,tre120m
+                         s29,wt,tre150m
+                         s31,wt,tre180m
+                         s32,wt,tre180m
+                         s35,wt,tre240m",sep =",",header =TRUE)
+condition <- with(sample.wt,paste(Genotype,Timepoint,sep=".")) ## with(data,expr) construct an environment/list/dataframe, argument expr: expression to evaluate
+dsgn.wt <- model.matrix(~0+condition)
+colnames(dsgn.wt) <- gsub("condition","",colnames(dsgn.wt))
+contrast.matrix <-makeContrasts(
+  wtvswt.20min = wt.tre20m - wt.pre,
+  wtvswt.30min = wt.tre30m - wt.pre,
+  wtvswt.45min = wt.tre45m - wt.pre,
+  wtvswt.60min = wt.tre60m - wt.pre,
+  wtvswt.90min = wt.tre90m - wt.pre,
+  wtvswt.120min = wt.tre120m - wt.pre,
+  wtvswt.150min = wt.tre150m - wt.pre,
+  wtvswt.180min = wt.tre180m - wt.pre,
+  wtvswt.240min = wt.tre240m - wt.pre,
+  levels=dsgn.wt)
+## makeContrasts(..., contrasts=NULL, levels) 
+##Arguments
+##...	
+##expressions, or character strings which can be parsed to expressions, specifying contrasts
+##contrasts=:	character vector specifying contrasts
+##levels character vector or factor giving the names of the parameters of which contrasts are desired, or a design matrix or other object with the parameter names as column names.
+
+fit <- lmFit(eset,dsgn.wt)
+fit1 <- contrasts.fit(fit,contrast.matrix)
+##Given a linear model fit to microarray data, compute estimated coefficients and standard errors for a given set of contrasts.
+##Usage
+##contrasts.fit(fit, contrasts=NULL, coefficients=NULL)
+fit2 <- eBayes(fit1)
+sig.wt <- decideTests( fit2, method = "global", lfc = 1 ) # only include genes more than 2 fold induced
+choose <- rowSums(sig.wt[,1:2]) >= 1 # select genes that are deemed significant in at least one exp.
+test <- coef(fit2)[choose,]
+
+5# plot the overlap/Venndiagram between the lists
+pdf(file="pre-wt-up.pdf",width = 15, height = 7.5)
+vennDiagram( fit2[,1:5], include = "up", circle.col = c("turquoise","salmon","orange","blue","yellow") )
+dev.off()
+pdf(file="pre-wt-down.pdf",width = 15, height = 7.5)
+vennDiagram( fit2[,1:5], include = "down", circle.col = c("turquoise","salmon","orange","blue","yellow") )
+dev.off()
+
+6## get DEG list of each Pi-starvation timepoint
+write.table(fit,file="coefficient-wt.txt",sep='\t',quote=F,row.names=F)
+dif.20m<-topTable(fit2,coef="wtvswt.20min",n=nrow(fit2),adjust="BH")##extract a table of the top-ranked genes from a linear model fit
+dif.30m<-topTable(fit2,coef="wtvswt.30min",n=nrow(fit2),adjust="BH")
+dif.45m<-topTable(fit2,coef="wtvswt.45min",n=nrow(fit2),adjust="BH")
+dif.60m<-topTable(fit2,coef="wtvswt.60min",n=nrow(fit2),adjust="BH")
+dif.90m<-topTable(fit2,coef="wtvswt.90min",n=nrow(fit2),adjust="BH")
+dif.120m<-topTable(fit2,coef="wtvswt.120min",n=nrow(fit2),adjust="BH")
+dif.150m<-topTable(fit2,coef="wtvswt.150min",n=nrow(fit2),adjust="BH")
+dif.180m<-topTable(fit2,coef="wtvswt.180min",n=nrow(fit2),adjust="BH")
+dif.240m<-topTable(fit2,coef="wtvswt.240min",n=nrow(fit2),adjust="BH")
+genesymbol.20m<-rownames(dif.20m)
+genesymbol.30m<-rownames(dif.30m)
+genesymbol.45m<-rownames(dif.45m)
+genesymbol.60m<-rownames(dif.60m)
+genesymbol.90m<-rownames(dif.90m)
+genesymbol.120m<-rownames(dif.120m)
+genesymbol.150m<-rownames(dif.150m)
+genesymbol.180m<-rownames(dif.180m)
+genesymbol.240m<-rownames(dif.240m)
+dif.20m<-cbind(genesymbol.20m,dif.20m)
+dif.30m<-cbind(genesymbol.30m,dif.30m)
+dif.45m<-cbind(genesymbol.45m,dif.45m)
+dif.60m<-cbind(genesymbol.60m,dif.60m)
+dif.90m<-cbind(genesymbol.90m,dif.90m)
+dif.120m<-cbind(genesymbol.120m,dif.120m)
+dif.150m<-cbind(genesymbol.150m,dif.150m)
+dif.180m<-cbind(genesymbol.180m,dif.180m)
+dif.240m<-cbind(genesymbol.240m,dif.240m)
+write.table(dif.20m,file="probeid.Foldchange-wt-20m.txt",sep='\t',quote=F,row.names=F)
+write.table(dif.30m,file="probeid.Foldchange-wt-30m.txt",sep='\t',quote=F,row.names=F)
+write.table(dif.45m,file="probeid.Foldchange-wt-45m.txt",sep='\t',quote=F,row.names=F)
+write.table(dif.60m,file="probeid.Foldchange-wt-60m.txt",sep='\t',quote=F,row.names=F)
+write.table(dif.90m,file="probeid.Foldchange-wt-90m.txt",sep='\t',quote=F,row.names=F)
+write.table(dif.120m,file="probeid.Foldchange-wt-120m.txt",sep='\t',quote=F,row.names=F)
+write.table(dif.150m,file="probeid.Foldchange-wt-150m.txt",sep='\t',quote=F,row.names=F)
+write.table(dif.180m,file="probeid.Foldchange-wt-180m.txt",sep='\t',quote=F,row.names=F)
+write.table(dif.240m,file="probeid.Foldchange-wt-240m.txt",sep='\t',quote=F,row.names=F)
+
+```
+
+
+```{r}
+# 6.sreening diff probeid
+dif2.20m<-topTable(fit2,coef="wtvswt.20min",n=nrow(fit2),lfc=log2(4),adjust="BH")
+dif2.30m<-topTable(fit2,coef="wtvswt.30min",n=nrow(fit2),lfc=log2(4),adjust="BH")
+dif2.45m<-topTable(fit2,coef="wtvswt.45min",n=nrow(fit2),lfc=log2(4),adjust="BH")
+dif2.60m<-topTable(fit2,coef="wtvswt.60min",n=nrow(fit2),lfc=log2(4),adjust="BH")
+dif2.90m<-topTable(fit2,coef="wtvswt.90min",n=nrow(fit2),lfc=log2(4),adjust="BH")
+dif2.120m<-topTable(fit2,coef="wtvswt.120min",n=nrow(fit2),lfc=log2(4),adjust="BH")
+dif2.150m<-topTable(fit2,coef="wtvswt.150min",n=nrow(fit2),lfc=log2(4),adjust="BH")
+dif2.180m<-topTable(fit2,coef="wtvswt.180min",n=nrow(fit2),lfc=log2(4),adjust="BH")
+dif2.240m<-topTable(fit2,coef="wtvswt.240min",n=nrow(fit2),lfc=log2(4),adjust="BH")
+## Extract a table of the top-ranked genes from a linear model fit. lcf: set the minimum absolute log2-fold-change as 2. topTable includes only genes with (at least one) absolute log-fold-changes greater than lfc.
+dif3.20m<-dif2.20m[dif2.20m[,"adj.P.Val"]<0.05,]
+dif3.30m<-dif2.30m[dif2.30m[,"adj.P.Val"]<0.05,]
+dif3.45m<-dif2.45m[dif2.45m[,"adj.P.Val"]<0.05,]
+dif3.60m<-dif2.60m[dif2.60m[,"adj.P.Val"]<0.05,]
+dif3.90m<-dif2.90m[dif2.90m[,"adj.P.Val"]<0.05,]
+dif3.120m<-dif2.120m[dif2.120m[,"adj.P.Val"]<0.05,]
+dif3.150m<-dif2.150m[dif2.150m[,"adj.P.Val"]<0.05,]
+dif3.180m<-dif2.180m[dif2.180m[,"adj.P.Val"]<0.05,]
+dif3.240m<-dif2.240m[dif2.240m[,"adj.P.Val"]<0.05,]
+genesymbol3.20m<-rownames(dif3.20m)
+genesymbol3.30m<-rownames(dif3.30m)
+genesymbol3.45m<-rownames(dif3.45m)
+genesymbol3.60m<-rownames(dif3.60m)
+genesymbol3.90m<-rownames(dif3.90m)
+genesymbol3.120m<-rownames(dif3.120m)
+genesymbol3.150m<-rownames(dif3.150m)
+genesymbol3.180m<-rownames(dif3.180m)
+genesymbol3.240m<-rownames(dif3.240m)
+dif3.20m<-cbind(genesymbol3.20m,dif3.20m)
+dif3.30m<-cbind(genesymbol3.30m,dif3.30m)
+dif3.45m<-cbind(genesymbol3.45m,dif3.45m)
+dif3.60m<-cbind(genesymbol3.60m,dif3.60m)
+dif3.90m<-cbind(genesymbol3.90m,dif3.90m)
+dif3.120m<-cbind(genesymbol3.120m,dif3.120m)
+dif3.150m<-cbind(genesymbol3.150m,dif3.150m)
+dif3.180m<-cbind(genesymbol3.180m,dif3.180m)
+dif3.240m<-cbind(genesymbol3.240m,dif3.240m)
+write.table(dif3.20m,file="diff.probeid.20m-FDR-adj.p0.05.txt",sep='\t',quote=F,row.names=F)
+write.table(dif3.30m,file="diff.probeid.30m-FDR-adj.p0.05.txt",sep='\t',quote=F,row.names=F)
+write.table(dif3.45m,file="diff.probeid.45m-FDR-adj.p0.05.txt",sep='\t',quote=F,row.names=F)
+write.table(dif3.60m,file="diff.probeid.60m-FDR-adj.p0.05.txt",sep='\t',quote=F,row.names=F)
+write.table(dif3.90m,file="diff.probeid.90m-FDR-adj.p0.05.txt",sep='\t',quote=F,row.names=F)
+write.table(dif3.120m,file="diff.probeid.120m-FDR-adj.p0.05.txt",sep='\t',quote=F,row.names=F)
+write.table(dif3.150m,file="diff.probeid.150m-FDR-adj.p0.05.txt",sep='\t',quote=F,row.names=F)
+write.table(dif3.180m,file="diff.probeid.180m-FDR-adj.p0.05.txt",sep='\t',quote=F,row.names=F)
+write.table(dif3.240m,file="diff.probeid.240m-FDR-adj.p0.05.txt",sep='\t',quote=F,row.names=F)
+```
+
+---
+```{r}
+# 7.expression level for diff probeid
+dif3.20m$genesymbol3.20m<-rownames(dif3.20m)
+
+dif3.30m$genesymbol3.30m<-rownames(dif3.30m)
+dif3.45m$genesymbol3.45m<-rownames(dif3.45m)
+dif3.60m$genesymbol3.60m<-rownames(dif3.60m)
+dif3.90m$genesymbol3.90m<-rownames(dif3.90m)
+dif3.120m$genesymbol3.120m<-rownames(dif3.120m)
+dif3.150m$genesymbol3.150m<-rownames(dif3.150m)
+dif3.180m$genesymbol3.180m<-rownames(dif3.180m)
+dif3.240m$genesymbol3.240m<-rownames(dif3.240m)
+
+loc3.20m<-match(dif3.20m$genesymbol3.20m,rownames(eset))
+loc3.30m<-match(dif3.30m$genesymbol3.30m,rownames(eset))
+loc3.45m<-match(dif3.45m$genesymbol3.45m,rownames(eset))
+loc3.60m<-match(dif3.60m$genesymbol3.60m,rownames(eset))
+loc3.90m<-match(dif3.90m$genesymbol3.90m,rownames(eset))
+loc3.120m<-match(dif3.120m$genesymbol3.120m,rownames(eset))
+loc3.150m<-match(dif3.150m$genesymbol3.150m,rownames(eset))
+loc3.180m<-match(dif3.180m$genesymbol3.180m,rownames(eset))
+loc3.240m<-match(dif3.240m$genesymbol3.240m,rownames(eset))
+
+DEG_exp3.20m<-eset[loc3.20m,]
+DEG_exp3.30m<-eset[loc3.30m,]
+DEG_exp3.45m<-eset[loc3.45m,]
+DEG_exp3.60m<-eset[loc3.60m,]
+DEG_exp3.90m<-eset[loc3.90m,]
+DEG_exp3.120m<-eset[loc3.120m,]
+DEG_exp3.150m<-eset[loc3.150m,]
+DEG_exp3.180m<-eset[loc3.180m,]
+DEG_exp3.240m<-eset[loc3.240m,]
+
+genesymbol3.20m<-rownames(DEG_exp3.20m)
+genesymbol3.30m<-rownames(DEG_exp3.30m)
+genesymbol3.45m<-rownames(DEG_exp3.45m)
+genesymbol3.60m<-rownames(DEG_exp3.60m)
+genesymbol3.120m<-rownames(DEG_exp3.120m)
+genesymbol3.90m<-rownames(DEG_exp3.90m)
+genesymbol3.150m<-rownames(DEG_exp3.150m)
+genesymbol3.180m<-rownames(DEG_exp3.180m)
+genesymbol3.240m<-rownames(DEG_exp3.240m)
+
+DEG_exp3.20m<-cbind(genesymbol3.20m,DEG_exp3.20m)
+DEG_exp3.30m<-cbind(genesymbol3.30m,DEG_exp3.30m)
+DEG_exp3.45m<-cbind(genesymbol3.45m,DEG_exp3.45m)
+DEG_exp3.60m<-cbind(genesymbol3.60m,DEG_exp3.60m)
+DEG_exp3.90m<-cbind(genesymbol3.90m,DEG_exp3.90m)
+DEG_exp3.120m<-cbind(genesymbol3.120m,DEG_exp3.120m)
+DEG_exp3.150m<-cbind(genesymbol3.150m,DEG_exp3.150m)
+DEG_exp3.180m<-cbind(genesymbol3.180m,DEG_exp3.180m)
+DEG_exp3.240m<-cbind(genesymbol3.240m,DEG_exp3.240m)
+
+write.table(DEG_exp3.20m,file="probeid.20m-FDR-adj.p0.05.exprs.txt",sep='\t',quote=F,row.names=F)
+write.table(DEG_exp3.30m,file="probeid.30m-FDR-adj.p0.05.exprs.txt",sep='\t',quote=F,row.names=F)
+write.table(DEG_exp3.45m,file="probeid.45m-FDR-adj.p0.05.exprs.txt",sep='\t',quote=F,row.names=F)
+write.table(DEG_exp3.60m,file="probeid.60m-FDR-adj.p0.05.exprs.txt",sep='\t',quote=F,row.names=F)
+write.table(DEG_exp3.90m,file="probeid.90m-FDR-adj.p0.05.exprs.txt",sep='\t',quote=F,row.names=F)
+write.table(DEG_exp3.120m,file="probeid.120m-FDR-adj.p0.05.exprs.txt",sep='\t',quote=F,row.names=F)
+write.table(DEG_exp3.150m,file="probeid.150m-FDR-adj.p0.05.exprs.txt",sep='\t',quote=F,row.names=F)
+write.table(DEG_exp3.180m,file="probeid.180m-FDR-adj.p0.05.exprs.txt",sep='\t',quote=F,row.names=F)
+write.table(DEG_exp3.240m,file="probeid.240m-FDR-adj.p0.05.exprs.txt",sep='\t',quote=F,row.names=F)
+
+## manually combine all there data into a list and delete the repeated genes, save the list and name it as WT-FDR-adj.p0.05.exprs.txt
+```
+
+---
+#2. Separate these genes by their induction kinetics to early and late group
+In order to see the kinetics of the DEGs in early and late group. First, I summarize the DEGs in each time point treatment, then comminbe all the DEGs lists together, delete the repeat genes in the list, and use heatmap to visualize and cluster the kinetics of genes that have similar expression profiles.
+
+---
+```{r}
+##8. plot pheatmap of ORGs and DEGs in early or late group
+## get the annotation file with real gene names, and name the txt file as probeid_genesymbol,go out R studio, use 4.probeid to genesymbol.perl to convert all the probe IDs in the WT-FDR-adj.p0.05.exprs.txt into genenames, and discard the uncharacterized ORFs. We got 194 DEGs in the new list genesymbol.FDR0.05.exprs.txt. Then we use them to seperately present the kinetics of all up- and down- regulated ORFs and genes and visualize them in heatmaps.
+
+#source("http://www.bioconductor.org/biocLite.R")
+#biocLite("pheatmap")
+library(pheatmap)
+DEG_exp<-read.table("WT-FDR-adj.p0.05.exprs.txt",
+                    sep='\t',header=T,row.names=1)
+pdf(file="pheatmap-wt.pdf",width=50,height=25)
+pheatmap(DEG_exp,
+         color=colorRampPalette(c("blue","white","orange"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="row",
+         border_color=NA,cluster_col = FALSE)
+dev.off()
+
+DEG_exp<-read.table("genesymbol.FDR0.05.exprs.txt",
+                    sep='\t',header=T,row.names=1)
+pdf(file="pheatmap-wtgenes.pdf",width=50,height=25)
+pheatmap(DEG_exp,
+         color=colorRampPalette(c("blue","white","orange"))(100),
+         fontsize_row=4,
+         fontsize_col=4,scale="row",
+         border_color=NA,cluster_col = FALSE)
+dev.off()
+```
+
+---
+##3.Identify the subset of the DEGs that are Pho4-dependent
+As a transcription factor, Pho4 translocate into the nucleus only under phosphate-starvation. In order to get the genes that potentially regulated by Pho4, we need to compare the subset of DEGs of WT and del4 strains under phosphate-depletion, and find the subset of DEGs that only regulated by WT strains but not by del4 deleted strains in early and late groups.
+
+## 3.1 Identify the subset of DEGs in del4 groups
+Control group:del4 pre (untreated)
+Experimental group: del4 treated (20min to 240min)
+
+| Experimental group | Control Group | Comment |
+| -------- | :---------- | :--------: | ------- |
+| del4 20'  | del4 pre  | 20 min up- and down- regulated genes upon phosphate starvation |
+| del4 30'  | del4 pre  | 30 min up- and down- regulated genes upon phosphate starvation |
+| del4 45'  | del4 pre  | 45 min up- and down- regulated genes upon phosphate starvation |
+| del4 60'  | del4 pre  | 60 min up- and down- regulated genes upon phosphate starvation |
+| del4 90'  | del4 pre  | 90 min up- and down- regulated genes upon phosphate starvation |
+| del4 120' | del4 pre  | 120 min up- and down- regulated genes upon phosphate starvation |
+| del4 150' | del4 pre  | 150 min up- and down- regulated genes upon phosphate starvation |
+| del4 180' | del4 pre  | 180 min up- and down- regulated genes upon phosphate starvation |
+| del4 240' | del4 pre  | 240 min up- and down- regulated genes upon phosphate starvation | 
+---
+
+```{r}
+## Input raw data
+rawdata <- fread("../sandbox/Ex009_reads_per_transcript_filtered_2018-12-02.txt", check.names = FALSE, stringsAsFactors = FALSE)
+
+# coerce columns of del4 to do differentially expressed genes (DEG) analysis
+untreated <- as.data.frame.matrix(rawdata[,36:37])
+tre.20min <- as.data.frame.matrix(rawdata[,40])
+tre.20min2 <- as.data.frame.matrix(rawdata[,1])
+tre.20min <- cbind(tre.20min,tre.20min2)
+
+tre.30min <- as.data.frame.matrix(rawdata[,4])
+tre.30min2 <- as.data.frame.matrix(rawdata[,6])
+tre.30min <- cbind(tre.30min,tre.30min2)
+
+tre.45min <- as.data.frame.matrix(rawdata[,9:10])
+tre.60min <- as.data.frame.matrix(rawdata[,15:16])
+
+tre.90min <- as.data.frame.matrix(rawdata[,18])
+tre.120min <- as.data.frame.matrix(rawdata[,21:22])
+tre.150min <- as.data.frame.matrix(rawdata[,25])
+tre.180min <- as.data.frame.matrix(rawdata[,28:29])
+tre.240min <- as.data.frame.matrix(rawdata[,31])
+
+
+genename <- as.data.frame.matrix(rawdata[,41])
+trial <- cbind(genename,untreated,tre.20min,tre.30min,tre.45min,tre.60min,tre.90min,tre.120min,tre.150min,tre.180min,tre.240min)
+write.table(trial,file = "Ex009-del4.txt",sep="\t",row.names=FALSE, quote=FALSE) ## still don't know whether I need sep="\t" here, quote = FALSE means nothing is quoted
+```
+
+```{r}
+## normalization
+rawdata <- fread("../sandbox/Ex009-del4.txt", check.names = FALSE, stringsAsFactors = FALSE)
+y<-DGEList(counts=rawdata[,2:18],genes= rawdata[,1])## [,]means lines or rows of matrix ##DGEList() Creates a DGEList object from a table of counts (rows=features, columns=samples), group indicator for each column, library size (optional) and a table of feature annotation (optional).
+y<-calcNormFactors(y) ##TMM normalization, based on the assumption that the majority of genes are not DEGs, calcNormFactors() Calculate normalization factors to scale the raw library sizes.
+plotMDS(y)##Plot samples on a two-dimensional scatterplot so that distances on the plot approximate the typical log2 fold changes between the samples.
+## calculate log transformed, normalized count
+cpm.o <- cpm( y, normalized.lib.sizes = FALSE, log = FALSE) # unnormalized
+cpm.o1 <- cpm( y, normalized.lib.sizes = FALSE, log = TRUE) # unnormalized, log transformed
+cpm.n1 <- cpm(y,normalized.lib.sizes = TRUE,log= FALSE)#normalized
+cpm.n <- cpm(y,normalized.lib.sizes = TRUE,log= TRUE, prior.count=0.5)#normalized, log transformed
+boxplot(cpm.o, outline= F)
+boxplot(cpm.o1, col="blue",outline= F)
+boxplot(cpm.n1, col="red",outline = F)
+boxplot(cpm.n, col="green",outline = F)
+cpm.n <- cbind(genename,cpm.n)
+cpm.n1 <- cbind(genename,cpm.n1)
+write.table(cpm.n1,file="TMMnorm-del4-nonlog.txt",row.names=FALSE,sep="\t",quote=F) #normalized
+write.table(cpm.n,file="TMMnorm-del4.txt",row.names=FALSE,sep="\t",quote=F) #normalized, log transformed
+```
+---
