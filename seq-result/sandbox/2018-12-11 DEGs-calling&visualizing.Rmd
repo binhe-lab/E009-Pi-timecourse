@@ -1,0 +1,351 @@
+---
+title: "2018-11-25 20min"
+output: html_document
+---
+
+---
+## Overall goal
+1. Identify the list of genes up- and down- regulated upon phosphate starvation
+2. Separate these genes by their induction kinetics to early and late group
+3. Identify the subset of them that are Pho4-dependent
+4. Compare the Pho4-dependent list of genes to previous results based on _pho80??_ background, and discuss any discrepancies
+---
+
+---
+## 1. Identify the up- and down- regulated genes list upon phosphate starvation
+We have a timecourse dataset of wt C.glabrata under phosphate starvation from 20min to 240min. In order to probe the overall sets of genes that can be regulated (either up- or down- regulated) upon phosphate starvation, we need to compare wt C.glabrata strains of distinct time frame of phosphate-depletion with untreated wt C.glabrata strains.
+
+## 1.1 Experiment set-up
+Experimental group: wt C.glabrata Phosphate-starvation (20min to 240min)
+Control group: wt C.glabrata pre (untreated)
+
+| Experimental group | Control Group | Comment |
+| -------- | :---------- | :--------: | ------- |
+| wt 20'  | wt pre  | 20 min up- and down- regulated genes upon phosphate starvation |
+| wt 30'  | wt pre  | 30 min up- and down- regulated genes upon phosphate starvation |
+| wt 45'  | wt pre  | 45 min up- and down- regulated genes upon phosphate starvation |
+| wt 60'  | wt pre  | 60 min up- and down- regulated genes upon phosphate starvation |
+| wt 90'  | wt pre  | 90 min up- and down- regulated genes upon phosphate starvation |
+| wt 120' | wt pre  | 120 min up- and down- regulated genes upon phosphate starvation |
+| wt 150' | wt pre  | 150 min up- and down- regulated genes upon phosphate starvation |
+| wt 180' | wt pre  | 180 min up- and down- regulated genes upon phosphate starvation |
+| wt 240' | wt pre  | 240 min up- and down- regulated genes upon phosphate starvation | 
+---
+
+## Prepare data
+
+```{r}
+##source("http://www.bioconductor.org/biocLite.R")
+##biocLite("VennDiagram")
+##biocLite("pheatmap")
+##biocLite("NMF")
+##biocLite("aroma.light")
+##install.packages("statmod")
+library(statmod)
+library(limma)         ## for differential gene expression analysis
+library(edgeR)         ## for DGEList()
+require(hexbin)
+require(ggplot2)       ## for plotting
+require(data.table)    ## for fast importing and manipulating data tables
+require(cowplot)       ## for some useful defaults in ggplot2
+require(RColorBrewer)  ## for plotting
+require(gplots)        ## for heatmap plot
+library(NMF)           ## for heatmap plot
+library(aroma.light)   ## for exploratory analysis
+library(knitr)
+library(hexbin)
+library(VennDiagram)
+library(pheatmap)
+library(statmod)
+```
+
+
+```{r}
+1# Input raw data
+raw <- fread("../sandbox/Ex009_reads_per_transcript_2017-10-18.txt", check.names = FALSE, stringsAsFactors = FALSE)
+
+# annotation
+anno.file <- fread("../data/annotation/C_glabrata_gene_for_mapping_s02-m07-r04.bed")
+names(anno.file) <- c("Chr","Start","End","GeneID","Not.Use","Strand","GeneName","Type.of.Gene") 
+anno <- anno.file[,c("Chr","GeneID","GeneName","Type.of.Gene")]
+setkey(anno, "GeneID")
+cgToSc <- fread("../data/annotation/C_glabrata_CBS138_S_cerevisiae_orthologs.txt")
+names(cgToSc) <- c("cgid","cgname","cgid2","scid","scname","scid2")
+setkey(cgToSc, "cgid")
+
+## names() sets names for the object 
+## setkey() sorts a data.table and marks it as sorted, the sorted columns are the key. The columns are sorted in ascending order always
+
+
+# filter dataset to remove very lowly expressed genes
+# 1. examine the distribution of reads for each gene across all samples, to establish a threshold
+S <- rowSums(raw[,1:40])
+Lib.size<-colSums(raw[,1:40])
+#plot(S)
+#plot(density(S))
+plot(density(log10(S)))
+plot(density(log10(Lib.size)))
+sprintf("The number of genes with less than 40 total counts across 40 samples, i.e. 1 read per sample on average is %d, and those with less than 100 total counts, or 2.5 reads per sample, is %d", sum(S<=40), sum(S<=100))
+print("Let's try 40 reads as a cutoff for dropping genes with low or no expression")
+
+##rowSums(),rowMeans(),colSums() form row and column sums and means for numeric arrays(or data frames)
+##density() computes kernal and bandwidth(sd of kernal), evaluates the density at specific points for data
+##sprintf() returns a character vector containing a combination of text and variable values; %d conversion by as.character is used for non-character arguments d:interger value
+##print() returns a character vector
+
+
+# filter dataset
+isexpr <- (S <= 40)
+use.genes <- grepl("ncRNA|ORF|pseudogene", anno$Type.of.Gene)
+use <- (!isexpr & use.genes)
+mat <- as.matrix(raw[use, 1:40])
+anno.all <- anno; anno <- anno.all[use]
+
+## ??? isexpr <- (S <= 40)
+## grepl() searches for mathces to argument pattern with each element, 
+   # grepl("1",c(1,2,3)); grepl("ncRNA|ORF|pseudogene",c("ORF|Uncharacterized","pseudogene"))
+## sub() abd gsub() perform replacement of the fist and all matches respectively
+## ??? (!isexpr&use.genes), ! indicated NOT, & and && indicates AND, | and || indicate OR
+## ??? why u can write raw[use,1:40], use is a matrix with logic values
+
+
+# write out the filtered table (uncomment if changes are made to the filtering steps above)
+#write.table(as.data.frame(raw[use]), file = paste("../sandbox/Ex009_reads_per_transcript_filtered_", Sys.Date(), ".txt", sep = ""), quote = FALSE, row.names = FALSE)
+
+## ??? how u get gene.names into this new table
+##need to go out and separate one column that cotained all the data to different columns 
+
+```
+
+
+```{r}
+2# coerce columns to do differentially expressed genes (DEG) analysis
+rawdata <- fread("../sandbox/Ex009_reads_per_transcript_filtered_2018-12-02.txt", check.names = FALSE, stringsAsFactors = FALSE)
+untreated <- as.data.frame.matrix(rawdata[,34:35])
+tre.20min <- as.data.frame.matrix(rawdata[,38:39])
+tre.30min <- as.data.frame.matrix(rawdata[,2:3])
+tre.45min <- as.data.frame.matrix(rawdata[,7:8])
+tre.60min <- as.data.frame.matrix(rawdata[,11])
+tre.60min2 <- as.data.frame.matrix(rawdata[,13])
+tre.60min <- cbind(tre.60min,tre.60min2)
+tre.90min <- as.data.frame.matrix(rawdata[,17])
+tre.120min <- as.data.frame.matrix(rawdata[,19:20])
+tre.150min <- as.data.frame.matrix(rawdata[,23])
+tre.180min <- as.data.frame.matrix(rawdata[,26:27])
+tre.240min <- as.data.frame.matrix(rawdata[,30])
+genename <- as.data.frame.matrix(rawdata[,41])
+trial <- cbind(genename,untreated,tre.20min,tre.30min,tre.45min,tre.60min,tre.90min,tre.120min,tre.150min,tre.180min,tre.240min)
+write.table(trial,file = "Ex009-wt.txt",sep="\t",row.names=FALSE, quote=FALSE) ## still don't know whether I need sep="\t" here, quote = FALSE means nothing is quoted
+
+
+```
+
+```{r}
+3# normalization
+rawdata <- fread("../sandbox/Ex009-wt.txt", check.names = FALSE, stringsAsFactors = FALSE)
+y<-DGEList(counts=rawdata[,2:18],genes= anno$GeneID)
+y<-calcNormFactors(y) 
+plotMDS(y)
+plotMDS(cpm(y,log=TRUE))
+## calculate log transformed, normalized count
+cpm.o <- cpm( y, normalized.lib.sizes = FALSE, log = FALSE) # unnormalized to library
+cpm.o1 <- cpm( y, normalized.lib.sizes = FALSE, log = TRUE) # unnormalized, log transformed
+cpm.n1 <- cpm(y,normalized.lib.sizes = TRUE,log= FALSE)#normalized
+cpm.n <- cpm(y,normalized.lib.sizes = TRUE,log= TRUE, prior.count=0.5)#normalized, log transformed
+boxplot(cpm.o, outline= F)
+boxplot(cpm.o1, col="blue",outline= F)
+boxplot(cpm.n1, col="red",outline = F)
+boxplot(cpm.n, col="green",outline = F)
+cpm.n <- cbind(genename,cpm.n)
+cpm.n1 <- cbind(genename,cpm.n1)
+write.table(cpm.n1,file="TMMnorm-wt-nonlog.txt",row.names=FALSE,sep="\t",quote=F) #normalized
+write.table(cpm.n,file="TMMnorm-wt.txt",row.names=FALSE,sep="\t",quote=F) #normalized, log transformed
+
+## [,]means lines or rows of matrix ##DGEList() Creates a DGEList object from a table of counts (rows=features, columns=samples), group indicator for each column, library size (optional) and a table of feature annotation (optional).
+##TMM normalization, based on the assumption that the majority of genes are not DEGs; calcNormFactors() Calculate normalization factors to scale the raw library sizes.
+##plotMDS() plot samples on a two-dimensional scatterplot so that distances on the plot approximate the typical log2 fold changes between the samples.
+## cpm() computes counts per million; rpkm() computes counts per kilobase per million
+```
+
+```{r}
+4## create design matrix
+eset <- read.table("../sandbox/TMMnorm-wt.txt", sep="\t",header = TRUE,row.names=1) ## why we need sep="\t",rownames=1 whether we have the first column for our row names, rather than included into the datafram, which could be no numeric.
+eset.pre <- eset[,1:2]
+eset.20m <- eset[,3:4]
+eset.30m <- eset[,5:6]
+eset.45m <- eset[,7:8]
+eset.60m <- eset[,9:10]
+eset.90m <- eset[,11]
+eset.120m <- eset[,12:13]
+eset.150m <- eset[,14]
+eset.180m <- eset[,15:16]
+eset.240m <- eset[,17]
+
+
+sample.wt <- read.table(text="Sample,Genotype,Timepoint
+                         S3,wt,pre
+                         S4,wt,pre
+                         S7,wt,tre20m
+                         s8,wt,tre20m
+                         s11,wt,tre30m
+                         s12,wt,tre30m
+                         s15,wt,tre45m
+                         s16,wt,tre45m
+                         s19,wt,tre60m
+                         s20,wt,tre60m
+                         s23,wt,tre90m
+                         s25,wt,tre120m
+                         s26,wt,tre120m
+                         s29,wt,tre150m
+                         s31,wt,tre180m
+                         s32,wt,tre180m
+                         s35,wt,tre240m",sep =",",header =TRUE)
+condition <- with(sample.wt,paste(Genotype,Timepoint,sep=".")) ## with(data,expr) construct an environment/list/dataframe, argument expr: expression to evaluate
+dsgn.wt <- model.matrix(~0+condition)
+colnames(dsgn.wt) <- gsub("condition","",colnames(dsgn.wt))
+contrast.matrix <-makeContrasts(
+  wtvswt.20min = wt.tre20m - wt.pre,
+  wtvswt.30min = wt.tre30m - wt.pre,
+  wtvswt.45min = wt.tre45m - wt.pre,
+  wtvswt.60min = wt.tre60m - wt.pre,
+  wtvswt.90min = wt.tre90m - wt.pre,
+  wtvswt.120min = wt.tre120m - wt.pre,
+  wtvswt.150min = wt.tre150m - wt.pre,
+  wtvswt.180min = wt.tre180m - wt.pre,
+  wtvswt.240min = wt.tre240m - wt.pre,
+  levels=dsgn.wt)
+
+##read.table() reads a file in table format and creates a data frame from it
+##with(data,expr,...) data to use for constructing an environment
+##paste() concatenates vectors after converting to character; paste("my","hobby",sep=".")
+## sub() abd gsub() perform replacement of the fist and all matches respectively
+## ??? model.matrix(~0+condition)
+## makeContrasts(..., contrasts=NULL, levels) 
+## ??? what is the logic behind model.matrix and makeContrast matrix, why we need to set levels in contrast matrix
+##expressions, or character strings which can be parsed to expressions, specifying contrasts
+##contrasts=:	character vector specifying contrasts
+##levels character vector or factor giving the names of the parameters of which contrasts are desired, or a design matrix or other object with the parameter names as column names.
+```
+---
+## Question: when we want to compare more than two groups ( not use moderated t-test ), How to use different statistical method to find DEGs,
+
+functions:
+estimateDisp() 
+## Maximizes the negative binomial likelihood to give the estimate of the different dispersions across all tags.
+Think abouT the relationship between normal distribution & Binomial distribution & Negative binomial distribution
+Why they assume the dispersion of the data is negative binomial distribution? (variance is higher than mean, compare to Poisson)
+estimateDisp()
+glmQLFit()
+glmQLFTest()
+glmTreat()
+topTags()
+---
+
+```{r}
+y <- estimateDisp(y, dsgn.wt, robust=TRUE)
+y$common.dispersion
+plotBCV(y)
+fit<-glmQLFit(y,dsgn.wt,robust=TRUE)
+head(fit$coefficients)
+plotQLDisp(fit)
+qlf<-glmQLFTest(fit,contrast=contrast.matrix)
+topTags(qlf)
+summary(decideTests(qlf))
+plotMD(qlf)
+anov<-glmTreat(fit,contrast=contrast.matrix)
+topTags(anov)
+write.table(topTags(anov,n=1000L, adjust.method="BH"),file="anov-wt-FC.txt",sep='\t',quote=F,row.names=F)
+```
+
+```{r}
+5.1# voom
+v <- voom (y,dsgn.wt,plot=TRUE)
+### linear fit of deg data
+fit <- lmFit(v,dsgn.wt)
+fit1 <- contrasts.fit(fit,contrast.matrix)
+##Given a linear model fit to microarray data, compute estimated coefficients and standard errors for a given set of contrasts.
+##Usage
+##contrasts.fit(fit, contrasts=NULL, coefficients=NULL)
+fit.voom <- eBayes(fit1)
+
+## get DEG list of each Pi-starvation timepoint
+dif<-topTable(fit.voom,coef=c("wtvswt.20min","wtvswt.30min","wtvswt.45min","wtvswt.60min","wtvswt.90min","wtvswt.120min","wtvswt.150min","wtvswt.180min","wtvswt.240min"),n=nrow(fit2),adjust="BH")
+genesymbol<-rownames(dif)
+dif<-cbind(genesymbol,dif)
+write.table(dif,file="probeid.FC-voom-wt.txt",sep='\t',quote=F,row.names=F)
+```
+
+```{r}
+5.2# limma-trend
+### linear fit of deg data
+fit <- lmFit(eset,dsgn.wt)
+fit1 <- contrasts.fit(fit,contrast.matrix)
+##Given a linear model fit to microarray data, compute estimated coefficients and standard errors for a given set of contrasts.
+##Usage
+##contrasts.fit(fit, contrasts=NULL, coefficients=NULL)
+fit2 <- eBayes(fit1)
+
+## get DEG list of each Pi-starvation timepoint
+dif<-topTable(fit2,coef=c("wtvswt.20min","wtvswt.30min","wtvswt.45min","wtvswt.60min","wtvswt.90min","wtvswt.120min","wtvswt.150min","wtvswt.180min","wtvswt.240min"),n=nrow(fit2),adjust="BH")
+genesymbol<-rownames(dif)
+dif<-cbind(genesymbol,dif)
+write.table(dif,file="probeid.FC-wt.txt",sep='\t',quote=F,row.names=F)
+```
+
+
+
+```{r}
+6# plot the overlap/Venndiagram between the lists
+sig.wt <- decideTests( fit2, method = "global", lfc = 1 ) #?? should lfc here be one or two only include genes more than 2 fold induced
+choose <- rowSums(sig.wt[,1:2]) >= 1 # select genes that are deemed significant in at least one exp.
+test <- coef(fit2)[choose,]
+vennDiagram(sig.wt[,1:5], include = "up", circle.col = c("turquoise","salmon","orange","blue","yellow"))
+vennDiagram(sig.wt[,1:5], include = "down", circle.col = c("turquoise","salmon","orange","blue","yellow"))
+```
+
+
+
+
+```{r}
+7# .sreening diff probeid
+dif2<-topTable(fit2,coef=c("wtvswt.20min","wtvswt.30min","wtvswt.45min","wtvswt.60min","wtvswt.90min","wtvswt.120min","wtvswt.150min","wtvswt.180min","wtvswt.240min"),n=nrow(fit2),lfc=log2(4),adjust="BH")
+dif3<-dif2[dif2[,"adj.P.Val"]<0.05,]
+genesymbol3<-rownames(dif3)
+dif3<-cbind(genesymbol3,dif3)
+write.table(dif3,file="diff.probeid-FC2-adj.p0.05.txt",sep='\t',quote=F,row.names=F)
+```
+
+```{r}
+8# .get heatmap of foldchange in DEGs
+library(pheatmap)
+DEG<-read.table("diff.probeid-FC2-adj.p0.05.txt",
+                    sep='\t',header=T,row.names=1)
+DEG<-DEG[,1:9]
+pdf(file="pheatmap-wt-FC.pdf",width=50,height=25)
+pheatmap(DEG,
+         color=colorRampPalette(c("black","yellow"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="none",
+         border_color=NA,cluster_col = FALSE)
+dev.off()
+
+## get out and use 4.probeid to genesymbol.perl to convert all the probe IDs into genesymbol and out put it in the DEG-FC2-0.05-wt.txt
+DEG2<-read.table("DEG-FC2-0.05-wt.txt",
+                    sep='\t',header=T,row.names=1)
+pdf(file="pheatmap-wt-FCDEGs.pdf",width=10,height=5)
+pheatmap(DEG2,
+         color=colorRampPalette(c("blue","black","yellow"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="none",
+         border_color=NA,cluster_col = FALSE)
+dev.off()
+```
+
+```{r}
+pheatmap(DEG2,
+         color=colorRampPalette(c("blue","black","yellow"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="none",
+         border_color=NA,cluster_col = FALSE,cluster_rows = TRUE,clustering_distance_rows = "euclidean")
+
+```
