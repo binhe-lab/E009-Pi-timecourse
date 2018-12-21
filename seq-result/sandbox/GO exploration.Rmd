@@ -1,0 +1,23 @@
+---
+title: "GO exploration"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  word_document: default
+---
+# install OrgDb object (annotation) of S.cerevisiae 
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("org.Sc.sgd.db", version = "3.8")
+## topGO
+BiocManager::install("topGO", version = "3.8")
+browseVignettes("topGO")
+```
+
+# clusterProfiler
+```{r}
+devtools::install_github("GuangchuangYu/clusterProfiler")
+require(clusterProfiler)
+```
