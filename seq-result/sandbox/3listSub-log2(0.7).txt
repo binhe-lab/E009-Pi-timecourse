@@ -1,0 +1,1 @@
+CHR	START	END	GeneID	Log2 fold CgPho4 alone	Log2 fold CgPho2 alone	Log2 fold CO	p+AC0-value CgPho4 alone	p+AC0-value CgPho2 alone	p+AC0-value CO
