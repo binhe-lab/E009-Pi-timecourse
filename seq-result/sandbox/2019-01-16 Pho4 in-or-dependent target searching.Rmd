@@ -278,9 +278,21 @@ write.table(bnotina,file="up-bnotina-log2=1.5.txt",sep='\t',quote=F,row.names=T)
 ### A'∩C
 cnotina <- del4.fc[!del4.fc[,1] %in% wt.fc[,1],] # log2=0.85 ? genes, log2=1 ? genes, log2=1.5 185 genes
 write.table(cnotina,file="up-cnotina-log2=1.5.txt",sep='\t',quote=F,row.names=T)
+### Pho4 definite targets A - (A∩C)∩B' 
+cnotinb <- del4.fc[!del4.fc[,1] %in% del80.fc[,1],]
+cnbina <- cnotinb[cnotinb[,1] %in% wt.fc[,1],]
+pho4def.tar <- wt.fc[!wt.fc[,1] %in% cnbina[,1],] #log2=0.85 log2=1 336 genes log2=1.5 235 genes
 ### compare the gene list of A and 79 genes in Bin's list
 bin79 <- fread("../sandbox/elife-25157-fig5-data2-v2.csv", check.names = FALSE, stringsAsFactors = FALSE) 
 ain79 <- wt.fc[wt.fc$genes %in% bin79$GeneID,] #log2=0.85 65 genes, log2=1 64, log2=1.5 61 genes found in a were also in 79 genes list
+### Output subsets of genes
+#write.table(onlyc.upge,file="up-onlyCwoB.txt",sep='\t',quote=F,row.names=T)
+#write.table(bina.all,file="up-bina-log2=1.5.txt",sep='\t',quote=F,row.names=T)
+#write.table(binterc.all,file="up-BinterC-log2=1.5.txt",sep='\t',quote=F,row.names=T) #add -log2=numbers for different fc threshold
+#write.table(bnotina,file="up-bnotina-log2=1.5.txt",sep='\t',quote=F,row.names=T) #add -log2=numbers for different fc threshold
+#write.table(cnotina,file="up-cnotina-log2=1.5.txt",sep='\t',quote=F,row.names=T)
+#write.table(onlycmod,file="up-Pho4indetargets.txt",sep='\t',quote=F,row.names=T)
+#write.table(pho4def.tar,file="up-pho4deftar-log2=0.85txt",sep='\t',quote=F,row.names=T)
 ```
 ## 5.4 voom analysis separately
 ```{r}
