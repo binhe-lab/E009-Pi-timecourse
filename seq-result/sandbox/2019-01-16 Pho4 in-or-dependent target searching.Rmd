@@ -1,0 +1,852 @@
+---
+title: "2018-11-25 20min"
+output: html_document
+---
+# Identify the subset of the DEGs that are Pho4-dependent
+As a transcription factor, Pho4 translocate into the nucleus only under phosphate-starvation. In order to get the genes that potentially regulated by Pho4, we need to compare the subset of DEGs of WT and del4 strains under phosphate-depletion, and find the subset of DEGs that only regulated by WT strains but not by del4 deleted strains in early and late groups.
+
+To call the DEGs of pho4 deleted strains, we have to compare the the differential expression of delpho4 strains under normal or phosphate-depleted conditions. Therefore, our criteria for calling the DEG list is to get genes that differentially expressed in at least one time point treatment with log2(fold change) higher than 2 and adjusted p value (pairwise F-test) less than 0.05. 
+
+## Identify the subset of DEGs in del4 groups
+Control group:del4 pre (untreated)
+Experimental group: del4 treated (from 20min to 240min)
+
+| Experimental group | Control Group | Comment |
+| -------- | :---------- | :--------: | ------- |
+| del4 20'  | del4 pre  | 20 min up- and down- regulated genes upon phosphate starvation |
+| del4 30'  | del4 pre  | 30 min up- and down- regulated genes upon phosphate starvation |
+| del4 45'  | del4 pre  | 45 min up- and down- regulated genes upon phosphate starvation |
+| del4 60'  | del4 pre  | 60 min up- and down- regulated genes upon phosphate starvation |
+| del4 90'  | del4 pre  | 90 min up- and down- regulated genes upon phosphate starvation |
+| del4 120' | del4 pre  | 120 min up- and down- regulated genes upon phosphate starvation |
+| del4 150' | del4 pre  | 150 min up- and down- regulated genes upon phosphate starvation |
+| del4 180' | del4 pre  | 180 min up- and down- regulated genes upon phosphate starvation |
+| del4 240' | del4 pre  | 240 min up- and down- regulated genes upon phosphate starvation | 
+
+# 0.Prepare package
+```{r}
+source("http://www.bioconductor.org/biocLite.R")
+#biocLite("edgeR")
+#biocLite("pheatmap")
+#biocLite("NMF")
+#biocLite("aroma.light")
+#install.packages("statmod")
+#install.packages("gtools")
+#install.packages("hexbin")
+#install.packages("data.table")
+#install.packages("cowplot")
+#install.packages("gplots")
+#install.packages("knitr")
+#install.packages("cowplot")
+#install.packages("RColorBrewer")
+#install.packages("dplyr")
+#install.packages("miscTools")
+library(miscTools)
+library(statmod)
+library(limma)         ## for differential gene expression analysis
+library(edgeR)         ## for DGEList()
+library(hexbin)
+library(ggplot2)       ## for plotting
+library(data.table)    ## for fast importing and manipulating data tables
+library(cowplot)       ## for some useful defaults in ggplot2
+library(RColorBrewer)  ## for plotting
+library(gplots)        ## for heatmap plot
+library(NMF)           ## for heatmap plot
+library(aroma.light)   ## for exploratory analysis
+library(knitr)
+library(VennDiagram)
+library(pheatmap)
+library(gtools)
+library(dplyr)
+```
+
+# 1. Input raw data
+```{r load_data}
+raw <- fread("../sandbox/Ex009_reads_per_transcript_2017-10-18.txt", check.names = FALSE, stringsAsFactors = FALSE)
+## annotation
+anno.file <- fread("../data/annotation/C_glabrata_gene_for_mapping_s02-m07-r04.bed")
+names(anno.file) <- c("Chr","Start","End","GeneID","Not.Use","Strand","GeneName","Type.of.Gene") 
+anno <- anno.file[,c("Chr","GeneID","GeneName","Type.of.Gene")]
+setkey(anno, "GeneID")
+cgToSc <- fread("../data/annotation/C_glabrata_CBS138_S_cerevisiae_orthologs.txt")
+names(cgToSc) <- c("cgid","cgname","cgid2","scid","scname","scid2")
+setkey(cgToSc, "cgid")
+## filter dataset to remove very lowly expressed genes
+## examine the distribution of reads for each gene across all samples, to establish a threshold
+S <- rowSums(raw[,1:40])
+Lib.size<-colSums(raw[,1:40])
+plot(density(log10(S)))
+plot(density(log10(Lib.size)))
+sprintf("The number of genes with less than 40 total counts across 40 samples, i.e. 1 read per sample on average is %d, and those with less than 100 total counts, or 2.5 reads per sample, is %d", sum(S<=40), sum(S<=100))
+print("Let's try 40 reads as a cutoff for dropping genes with low or no expression")
+# filter dataset
+isexpr <- (S <= 40)
+use.genes <- grepl("ncRNA|ORF|pseudogene", anno$Type.of.Gene)
+use <- (!isexpr & use.genes)
+mat <- as.matrix(raw[use, 1:40])
+anno.all <- anno; anno <- anno.all[use]
+```
+----
+names() sets names for the object 
+setkey() sorts a data.table and marks it as sorted, the sorted columns are the key. The columns are sorted in ascending order always
+rowSums(),rowMeans(),colSums() form row and column sums and means for numeric arrays(or data frames)
+density() computes kernal and bandwidth(sd of kernal), evaluates the density at specific points for data
+sprintf() returns a character vector containing a combination of text and variable values; %d conversion by as.character is used for non-character arguments d:interger value
+print() returns a character vector
+??? isexpr <- (S <= 40)
+grepl() searches for mathces to argument pattern with each element, 
+   # grepl("1",c(1,2,3)); grepl("ncRNA|ORF|pseudogene",c("ORF|Uncharacterized","pseudogene"))
+sub() abd gsub() perform replacement of the fist and all matches respectively
+??? (!isexpr&use.genes), ! indicated NOT, & and && indicates AND, | and || indicate OR
+??? why u can write raw[use,1:40], use is a matrix with logic values
+write out the filtered table (uncomment if changes are made to the filtering steps above)
+write.table(as.data.frame(raw[use]), file = paste("../sandbox/Ex009_reads_per_transcript_filtered_", Sys.Date(), ".txt", sep = ""), quote = FALSE, row.names = FALSE)
+how u get gene.names into this new table
+need to go out and separate one column that cotained all the data to different columns 
+
+# 2. coerce columns to do differentially expressed genes (DEG) analysis(all groups)
+```{r}
+rawdata <- fread("../sandbox/Ex009_reads_per_transcript_filtered_2018-12-02.txt", check.names = FALSE, stringsAsFactors = FALSE)
+sample <- fread("../data/sample_sheet/Ex009_experiment_set_up_20171019.csv",check.names = FALSE, stringsAsFactors = FALSE)
+ind.all <- which(!grepl("prime",sample$Sample))
+ind.sall <- sample[ind.all,]
+ind0 <- match(c("gene.names",ind.sall$Sample),names(rawdata))
+ind.all <- rawdata[,ind0,with=F]
+```
+
+# 3. normalization (all groups)
+```{r}
+y.all<-DGEList(counts=ind.all[,2:39],genes=ind.all$gene.names)
+y.all<-calcNormFactors(y.all)
+plotMDS(cpm(y.all,log=TRUE))
+cpm.all <- cpm(y.all,normalized.lib.sizes = TRUE,log= TRUE, prior.count=0.5)
+cpm.all1 <- cpm(y.all,normalized.lib.sizes = TRUE,log= FALSE)
+boxplot(cpm.all, col="green",outline = F)
+boxplot(cpm.all1, col="blue",outline = F)
+```
+----
+[,]means lines or rows of matrix ##DGEList() Creates a DGEList object from a table of counts (rows=features, columns=samples), group indicator for each column, library size (optional) and a table of feature annotation (optional).
+TMM normalization, based on the assumption that the majority of genes are not DEGs; calcNormFactors() Calculate normalization factors to scale the raw library sizes.
+plotMDS() plot samples on a two-dimensional scatterplot so that distances on the plot approximate the typical log2 fold changes between the samples.
+cpm() computes counts per million; rpkm() computes counts per kilobase per million
+
+# 4. create design matrix(all groups)
+```{r}
+condition.all <- with(ind.sall,paste(Genotype,Timepoint,sep="."))
+dsgn.all <- model.matrix(~0+condition.all)
+colnames(dsgn.all) <- gsub("condition.all","",colnames(dsgn.all))
+contrast.matrix.all <- makeContrasts(
+  del4vsdel4.20min = del4.20m - del4.pre,    # Set C
+  del4vsdel4.30min = del4.30m - del4.pre,
+  del4vsdel4.45min = del4.45m - del4.pre,
+  del4vsdel4.60min = del4.60m - del4.pre,
+  del4vsdel4.90min = del4.90m - del4.pre,
+  del4vsdel4.120min = del4.120m - del4.pre,
+  del4vsdel4.150min = del4.150m - del4.pre,
+  del4vsdel4.180min = del4.180m - del4.pre,
+  del4vsdel4.240min = del4.240m - del4.pre,
+  wtvswt.20min = wt.20m - wt.pre,            # Set A
+  wtvswt.30min = wt.30m - wt.pre,
+  wtvswt.45min = wt.45m - wt.pre,
+  wtvswt.60min = wt.60m - wt.pre,
+  wtvswt.90min = wt.90m - wt.pre,
+  wtvswt.120min = wt.120m - wt.pre,
+  wtvswt.150min = wt.150m - wt.pre,
+  wtvswt.180min = wt.180m - wt.pre,
+  wtvswt.240min = wt.240m - wt.pre,
+  wtvswt.del80 = wt.del80 - wt.pre,
+  del80vsdel4.del80 = wt.del80 - del4.del80, # Set B
+  levels=dsgn.all)
+```
+----
+read.table() reads a file in table format and creates a data frame from it
+with(data,expr,...) data to use for constructing an environment
+paste() concatenates vectors after converting to character; paste("my","hobby",sep=".")
+sub() abd gsub() perform replacement of the fist and all matches respectively
+??? model.matrix(~0+condition)
+makeContrasts(..., contrasts=NULL, levels) 
+??? what is the logic behind model.matrix and makeContrast matrix, why we need to set levels in contrast matrix
+expressions, or character strings which can be parsed to expressions, specifying contrasts
+contrasts=:	character vector specifying contrasts
+levels character vector or factor giving the names of the parameters of which contrasts are desired, or a design matrix or other object with the parameter names as column names.
+
+Question: when we want to compare more than two groups ( not use moderated t-test ), How to use different statistical method to find DEGs? Voom, fit them together with matrix design
+functions:
+estimateDisp() 
+Maximizes the negative binomial likelihood to give the estimate of the different dispersions across all tags.
+Think abouT the relationship between normal distribution & Binomial distribution & Negative binomial distribution
+Why they assume the dispersion of the data is negative binomial distribution? (variance is higher than mean, compare to Poisson)
+estimateDisp()
+glmQLFit()
+glmQLFTest()
+glmTreat()
+topTags()
+
+# 5.DEGs Analysis
+## 5.1. voom(TMM normalized linear fit of all groups)
+```{r}
+lcpm.all <- cpm(y.all, normalized.lib.sizes = T, log = F, prior.count = 0.5)
+lcpm.all <- cbind(gene.names=ind.all$gene.names,lcpm.all)
+v.all <- voom(y.all,dsgn.all,plot=F)
+fit.all <- lmFit(v.all,dsgn.all)
+fit0 <- contrasts.fit(fit.all,contrast.matrix.all)
+fit.all <- eBayes(fit0)
+```
+## 5.2 Get the DEGs list of 3 compared groups
+```{r}
+### wt vs. wt no Pi
+dif03 <- topTable(fit.all,coef=c("wtvswt.20min","wtvswt.30min","wtvswt.45min","wtvswt.60min","wtvswt.90min","wtvswt.120min","wtvswt.150min","wtvswt.180min","wtvswt.240min"),n=nrow(fit.all),lfc=log2(2),adjust="BH")
+dif04 <- dif03[dif03[,"adj.P.Val"]<0.01,]
+write.table(dif04,file="all-wt.txt",sep='\t',quote=F,row.names=F)
+#### log2(1.8),p<0.01 wt
+dif033 <- topTable(fit.all,coef=c("wtvswt.20min","wtvswt.30min","wtvswt.45min","wtvswt.60min","wtvswt.90min","wtvswt.120min","wtvswt.150min","wtvswt.180min","wtvswt.240min"),n=nrow(fit.all),lfc=log2(1.8),adjust="BH")
+dif044<-dif033[dif033[,"adj.P.Val"]<0.01,] # Set A
+write.table(dif044,file="all-wt-log2(1.8)-p0.01.txt",sep='\t',quote=F,row.names=F)
+### del4 vs. del4 no Pi
+dif05 <- topTable(fit.all,coef=c("del4vsdel4.20min","del4vsdel4.30min","del4vsdel4.45min","del4vsdel4.60min","del4vsdel4.90min","del4vsdel4.120min","del4vsdel4.150min","del4vsdel4.180min","del4vsdel4.240min"),n=nrow(fit.all),adjust="BH")
+write.table(dif05,file="all-del4.txt",sep='\t',quote=F,row.names=F)
+### log2(1.8),p<0.01 del4
+dif055<-topTable(fit.all,coef=c("del4vsdel4.20min","del4vsdel4.30min","del4vsdel4.45min","del4vsdel4.60min","del4vsdel4.90min","del4vsdel4.120min","del4vsdel4.150min","del4vsdel4.180min","del4vsdel4.240min"),n=nrow(fit.all),lfc=log2(1.8),adjust="BH")
+dif066<-dif055[dif055[,"adj.P.Val"]<0.01,] # Pho4 independent targets(PSR) + Pho4 redundant targets(PSR) Set C
+write.table(dif066,file="all-del4-log2(1.8)-p0.01.txt",sep='\t',quote=F,row.names=F)
+### del80del4 vs. del80
+dif07 <- topTable(fit.all,coef="del80vsdel4.del80",n=nrow(fit.all),lfc=log2(1.8),adjust="BH")
+dif077 <- dif07[dif07[,"adj.P.Val"]<0.01,] # Set B
+write.table(dif077,file="all-del80-log2(1.8)-p0.01.txt",sep='\t',quote=F,row.names=F)
+```
+## 5.3.1 Get the DEGs independent of Pho4 (TMM-all)
+```{r}
+###  Compare the genelist of wt and del4 and find their subsets (max FC strategy)
+fcdel4.all <- dif066[,1:3]
+fcdel4.all <- transform(fcdel4.all,averaged4.23=(fcdel4.all$del4vsdel4.20min+fcdel4.all$del4vsdel4.30min)/2)
+fcwt.all <- dif044[,1:3]
+fcwt.all <- transform(fcwt.all,averagewt.23=(fcwt.all$wtvswt.20min+fcwt.all$wtvswt.30min)/2)
+### filter out downregulated DEGs
+fcdel4.all <- subset(fcdel4.all,averaged4.23>1.8,averaged4.23&genes)
+fcwt.all <- subset(fcwt.all,averagewt.23>1.8,averagewt.23&genes)
+### find the DEGs that are pho4 target candidates
+co1 <- match(rownames(fcwt.all),rownames(fcdel4.all));co11 <- sort(co1)
+co2 <- fcdel4.all[co11,]
+co22 <- match(rownames(co2),rownames(fcwt.all)); 
+co222 <- fcwt.all[co22,]
+co3 <- cbind(co2,co222$wtvswt.20min,co222$wtvswt.30min,co222$averagewt.23)
+colnames(co3) <- c("genes","del4.20min","del4.30min","average.d4","wt.20min","wt.30min","average.wt")
+co4 <- transform(co3,minus=co3$average.d4-co3$average.wt)
+co5 <- subset(co4,minus>0.6) # 22 genes
+co6 <- subset(co4,minus<0.6&minus>0)  # 62 genes
+co7 <- subset(co4,minus<0&minus>-0.5) # 71 genes
+write.table(co5,file="del4in-log2(0.6).txt",sep='\t',quote=F,row.names=F)
+write.table(co6,file="del4in-0tolog2(0.6).txt",sep='\t',quote=F,row.names=F)
+write.table(co7,file="del4in-log2(-0.5)to0.txt",sep='\t',quote=F,row.names=F)
+```
+## 5.3.2 Pho4 independent targets of PSR(set concepts)
+```{r}
+# Get the set of A,B,C
+wt.fc <- dif044[,1:10]
+del80.fc <- dif077[,1:2]; colnames(del80.fc) <- c("genes","pho80pho4vspho80")
+del4.fc <- dif066[,1:10]
+maxn <- function(n) function(x) order(x, decreasing = TRUE)[n]
+wt.fc[,"no.pi.wt.sec.max"] <- apply(wt.fc[,2:10],1,function(x) x[maxn(2)(x)])
+del4.fc[,"no.pi.del4.sec.max"] <- apply(del4.fc[,2:10],1,function(x) x[maxn(2)(x)])
+wt.fc <- subset(wt.fc,wt.fc$no.pi.wt.sec.max>=1.5) # alter the threshold here
+del4.fc <- subset(del4.fc,del4.fc$no.pi.del4.sec.max>=1.5) # alter the threshold here
+del80.fc <- subset(del80.fc,del80.fc$pho80pho4vspho80>=1.5) # alter the threshold here
+### B∩C 
+binterc.upge <- del4.fc[del4.fc[,1] %in% del80.fc[,1],] 
+binterc.or <- binterc.upge[with(binterc.upge,order(genes,decreasing = FALSE)),]
+binterc2 <- del80.fc[del80.fc[,1] %in% del4.fc[,1],]
+binterc2.or <- binterc2[with(binterc2,order(genes,decreasing = FALSE)),]
+binterc.all <- cbind(binterc2.or,binterc.or[,2:11]) # log2=0.85 150 genes, log2=1 120 genes; log2=1.5 58 genes
+write.table(binterc.all,file="up-BinterC-log2=1.5.txt",sep='\t',quote=F,row.names=T) #add -log2=numbers for different fc threshold
+### A∩B∩C
+ainbinc <- binterc.all[binterc.all[,1] %in% del4.fc[,1],]
+### A'∩(B∩C)
+reduntar <- binterc.upge[!binterc.upge[,1] %in% wt.fc[,1],]
+###B'∩C
+onlyc.upge <- del4.fc[!del4.fc[,1] %in% del80.fc[,1],]
+write.table(onlyc.upge,file="up-onlyCwoB.txt",sep='\t',quote=F,row.names=T)
+### (B'∩C)∩A
+onlycmod <- wt.fc[wt.fc[,1] %in% onlyc.upge[,1],] # log2=0.85 1094 genes, log2=1.8 376 genes out of 525 genes were also activated in wt no Pi group; log2=1 944 genes
+write.table(onlycmod,file="up-Pho4indetargets.txt",sep='\t',quote=F,row.names=T)
+### A'∩B & A∩B
+bnotina <- del80.fc[!del80.fc[,1] %in% wt.fc[,1],] # log2=0.85 25 genes, log2=1 23 genes, log2=1.5 17 genes 
+bina <- del80.fc[del80.fc[,1] %in% wt.fc[,1],]
+bina.or <- bina[with(bina,order(genes,decreasing = FALSE)),]
+bina2 <- wt.fc[wt.fc[,1] %in% bina.or[,1],]
+bina2.or <- bina2[with(bina2,order(genes,decreasing = FALSE)),]
+bina.all <- cbind(bina.or,bina2.or[,2:11])  # log2=0.85 157 genes, log2=1 126 genes, log2=1.5 66 genes
+write.table(bina.all,file="up-bina-log2=1.5.txt",sep='\t',quote=F,row.names=T)
+write.table(bnotina,file="up-bnotina-log2=1.5.txt",sep='\t',quote=F,row.names=T) #add -log2=numbers for different fc threshold
+### A'∩C
+cnotina <- del4.fc[!del4.fc[,1] %in% wt.fc[,1],] # log2=0.85 ? genes, log2=1 ? genes, log2=1.5 185 genes
+write.table(cnotina,file="up-cnotina-log2=1.5.txt",sep='\t',quote=F,row.names=T)
+### compare the gene list of A and 79 genes in Bin's list
+bin79 <- fread("../sandbox/elife-25157-fig5-data2-v2.csv", check.names = FALSE, stringsAsFactors = FALSE) 
+ain79 <- wt.fc[wt.fc$genes %in% bin79$GeneID,] #log2=0.85 65 genes, log2=1 64, log2=1.5 61 genes found in a were also in 79 genes list
+```
+## 5.4 voom analysis separately
+```{r}
+### screen DEGs in wt treated groups
+dif3 <- topTable(fit.all,coef=c("wtvswt.20min","wtvswt.30min","wtvswt.45min","wtvswt.60min","wtvswt.90min","wtvswt.120min","wtvswt.150min","wtvswt.180min","wtvswt.240min"),n=nrow(fit.wt),lfc=log2(2),adjust="BH")
+dif4<-dif3[dif3[,"adj.P.Val"]<0.01,]
+write.table(dif4,file="all-wt-DEGs.txt",sep='\t',quote=F,row.names=F)
+dif31 <- topTable(fit.all,coef=c("wtvswt.20min","wtvswt.30min","wtvswt.45min","wtvswt.60min","wtvswt.90min","wtvswt.120min","wtvswt.150min","wtvswt.180min","wtvswt.240min"),n=nrow(fit.wt),lfc=log2(4),adjust="BH")
+dif41<-dif31[dif31[,"adj.P.Val"]<0.05,]
+write.table(dif41,file="all-4FC.txt",sep='\t',quote=F,row.names=F)
+### screening overall FC value of del4 groups
+dif5<-topTable(fit.all,coef=c("del4vsdel4.20min","del4vsdel4.30min","del4vsdel4.45min","del4vsdel4.60min","del4vsdel4.90min","del4vsdel4.120min","del4vsdel4.150min","del4vsdel4.180min","del4vsdel4.240min"),n=nrow(fit.del4),adjust="BH")
+write.table(dif5,file="del4-all2.txt",sep='\t',quote=F,row.names=F)
+```
+----
+Given a linear model fit to microarray data, compute estimated coefficients and standard errors for a given set of contrasts.
+contrasts.fit(fit, contrasts=NULL, coefficients=NULL)
+# 6. find DEGs dependent on Pho4 (indirect and direct targets)
+## 6.1 Using 2nd maximal log2FC value to find Pho4 target candidates (TMM-all)
+```{r}
+fcw.all <- dif04[,1:10]
+### 2nd largest log2FC
+maxn <- function(n) function(x) order(x, decreasing = TRUE)[n]
+fcw.all[,"sec.max"] <- apply(fcw.all[,2:10],1,function(x) x[maxn(2)(x)])
+fcw.all.sec <- as.data.frame(cbind(fcw.all$genes,fcw.all$sec.max));colnames(fcw.all.sec)<-c("genes","sec.max")
+write.table(fcw.all.sec,file="sec.max-all-wt.txt",sep='\t',quote=F,row.names=F)
+sec.fcw.all <- read.table("../sandbox/sec.max-all-wt.txt",sep='\t',header=T,row.names=1)
+### get the max fold change value of all genes del4 no-Pi treated groups
+fcd.all <- dif05[,1:10]
+fcd.all[,"max"] <- apply(fcd.all[,2:10],1,max)
+fcd4.all <- as.data.frame(cbind(fcd.all[,"genes"],fcd.all[,"max"]));colnames(fcd4.all)<-c("genes","max")
+write.table(fcd4.all,file="max-all-del4.txt",sep='\t',quote=F,row.names=F)
+fc.d4.all <- read.table("../sandbox/max-all-del4.txt",sep='\t',header=T,row.names=1)
+### filter out downregulated DEGs
+sec.fcw1.all <- subset(sec.fcw.all,sec.max>=0.5,sec.max)
+### find the DEGs that are pho4 target candidates
+a1 <- match(rownames(sec.fcw1.all),rownames(fc.d4.all))
+a2 <- fc.d4.all[a1,]
+a3 <- cbind(sec.fcw1.all,a2); colnames(a3) <- c("wt.max","del4.max")
+a4 <- transform(a3,minus=a3$wt.max-a3$del4.max)
+a33 <- subset(a4,minus>0.6)  # 188 genes
+a44 <- subset(a4,minus>0.7)  # 156 genes
+a40 <- subset(a4,minus>0.85) # 109 genes
+a5 <- subset(a4,minus>1)     # 85 genes
+a55 <- subset(a4,minus>1.5)  # 37
+a6 <- subset(a4,minus>2)     # 21
+a7 <- subset(a4,minus>2.5)   # 10
+aa0 <- subset(a4,minus>0.7&minus<1) # 71 genes
+aa1 <- subset(a4,minus>1&minus<1.5) # 48 genes
+aa2 <- subset(a4,minus>1.5&minus<2) # 16 genes
+aa3 <- subset(a4,minus>2&minus<2.5) # 11 genes
+# attention! open txt file and align the column names
+#write.table(a33,file="TMM-2ndmax-log2(0.6).txt",sep='\t',quote=F,row.names=T) 
+#write.table(a44,file="TMM-2ndmax-log2(0.7).txt",sep='\t',quote=F,row.names=T)
+#write.table(a40,file="TMM-2ndmax-log2(0.85).txt",sep='\t',quote=F,row.names=T)
+#write.table(a4,file="minus-all.txt",sep='\t',quote=F,row.names=T)
+# get the early activated and gradually/lately activated Pho4 target candidate list (2nd max TMM-all)
+fcw.all <- transform(fcw.all,averagewt.23=(fcw.all$wtvswt.20min+fcw.all$wtvswt.30min)/2,averagewt.late=(fcw.all$wtvswt.180min+fcw.all$wtvswt.240min)/2)
+fcw.all <- transform(fcw.all,av.minus=averagewt.late-averagewt.23)
+fcw.alsi <- fcw.all[,c("genes","sec.max","av.minus")]
+fcw.alsi <- subset(fcw.alsi,sec.max>=0.5,genes&sec.max&av.minus)
+se1 <- match(fcw.alsi$genes,fcd4.all$genes)
+se2 <- fcd4.all[se1,]
+se3 <- cbind(fcw.alsi,se2[,"max"]);colnames(se3) <- c("genes","wt.sec","av.minus","del4.max") # del4.max becomes factors and cannot be calculate
+#write.table(se3,file="kinetics-pho4-targets.txt",sep='\t',quote=F,row.names=F)
+se4 <- read.table("../sandbox/kinetics-pho4-targets.txt",sep='\t',header=T,row.names=1)
+se5 <- transform(se4,ded=se4$wt.sec-se4$del4.max)
+se0 <- subset(se5,ded>0.6) # 188 genes
+se01 <- subset(se5,ded>0.7) # 156 gebes
+se02 <- subset(se5,ded>0.85) # 109 genes
+se03 <- subset(se5,ded>1)   # 85 genes
+se04 <- subset(se5,ded>1.5) # 37 genes
+
+se77 <- subset(se5,av.minus<1.5) # 1191 gebes find genes that lately activating fold change value is not higher than early activating fold change value
+se8 <- subset(se5,av.minus>=1.5) # 232 genes
+se9 <- subset(se5,av.minus>=2) # 113 genes
+# find early and lately activated genes
+se84 <- subset(se8,ded>1.5) # 19 genes lately activated
+se774 <- subset(se77,ded>1.5) # 18 genes early activated
+```
+## 6.2 Using maximum log2FC value to find Pho4 target candidates
+```{r}
+### get the 2nd and max fold change value of DEGs of wt no-Pi treated groups
+fcw <- dif4[,1:10]
+### 2nd largest log2FC
+maxn <- function(n) function(x) order(x, decreasing = TRUE)[n]
+fcw[,"sec.max"] <- apply(fcw[,2:10],1,function(x) x[maxn(3)(x)])
+fcwt.sec <- as.data.frame(cbind(fcw$genes,fcw$sec.max));colnames(fcwt.sec)<-c("genes","sec.max")
+write.table(fcwt.sec,file="sec.max-wt.txt",sep='\t',quote=F,row.names=F)
+sec.fc.wt <- read.table("../sandbox/sec.max-wt.txt",sep='\t',header=T,row.names=1)
+### max logFC
+fcw[,"max"] <- apply(fcw[,2:10],1,max)
+fcwt <- as.data.frame(cbind(fcw$genes,fcw$max));colnames(fcwt)<-c("genes","max")
+write.table(fcwt,file="max-wt.txt",sep='\t',quote=F,row.names=F)
+fc.wt <- read.table("../sandbox/max-wt.txt",sep='\t',header=T,row.names=1)
+### filter out downregulated DEGs
+fc.wt1 <- subset(fc.wt,max>=1,max)
+sec.fc.wt1 <- subset(sec.fc.wt,sec.max>=1,sec.max)
+### get the max fold change value of all genes del4 no-Pi treated groups
+fcd <- dif5[,1:10]
+fcd[,"max"] <- apply(fcd[,2:10],1,max)
+fcd4 <- as.data.frame(cbind(fcd[,"genes"],fcd[,"max"]));colnames(fcd4)<-c("genes","max")
+write.table(fcd4,file="max-del4.txt",sep='\t',quote=F,row.names=F)
+fc.d4 <- read.table("../sandbox/max-del4.txt",sep='\t',header=T,row.names=1)
+### find the DEGs that are pho4 target candidates
+m1 <- match(rownames(fc.wt1),rownames(fc.d4))
+m2 <- fc.d4[m1,]
+m3 <- cbind(fc.wt1,m2); colnames(m3) <- c("wt.max","del4.max")
+m4 <- transform(m3,minus=m3$wt.max-m3$del4.max)
+m5 <- subset(m4,minus>1)    # 143 genes
+m55 <- subset(m4,minus>1.5) # 66
+m6 <- subset(m4,minus>2)    # 28
+m7 <- subset(m4,minus>2.5)  # 15
+m8 <- subset(m4,minus>3)    # 10
+write.table(m5,file="pho4-cans-2F.txt",sep='\t',quote=F)
+write.table(m6,file="pho4-cans-4F.txt",sep='\t',quote=F)
+write.table(m8,file="pho4-cans-8F.txt",sep='\t',quote=F)
+### find the DEGs that are pho4 target candidates by 2ndlargest fc
+s1 <- match(rownames(sec.fc.wt1),rownames(fc.d4))
+s2 <- fc.d4[s1,]
+s3 <- cbind(sec.fc.wt1,s2); colnames(s3) <- c("wt.sec.max","del4.max")
+s4 <- transform(s3,minus=s3$wt.sec.max-s3$del4.max)
+s5 <- subset(s4,minus>1)    # 85 genes
+s55 <- subset(s4,minus>1.5) # 37
+s6 <- subset(s4,minus>2)    # 20
+s7 <- subset(s4,minus>2.5)  # 9
+s8 <- subset(s4,minus>3)    # 8
+### cluster the DEGs in to different induction levels
+l0 <- subset(m4,minus>0.7&minus<1) # 144 genes
+l1 <- subset(m4,minus>1&minus<1.5) # 77 genes
+l2 <- subset(m4,minus>1.5&minus<2) # 38 genes
+l3 <- subset(m4,minus>2&minus<2.5) # 13 genes
+ll0 <- subset(s4,minus>0.7&minus<1) # 65 genes
+ll1 <- subset(s4,minus>1&minus<1.5) # 48 genes
+ll2 <- subset(s4,minus>1.5&minus<2) # 17 genes
+ll3 <- subset(s4,minus>2&minus<2.5) # 11 genes
+rownames(ll1)
+### find the del80 DEGs that are pho4 target candidates
+dif.del80 <- read.table("../sandbox/del80-DEGs.txt",sep="\t",header=T,row.names=1)
+fc.d8 <- subset(dif.del80,logFC>=2,logFC)
+### write.table(fc.d8,file="max-del80.txt",sep='\t',quote=F,row.names=F)
+dif.del4del80 <-read.table("../sandbox/del4del80-all.txt",sep="\t",header=T,row.names=1)
+dif.del4del80 <- subset(dif.del4del80,logFC>=-1000,logFC)
+n1 <- match(rownames(fc.d8),rownames(dif.del4del80))
+n2 <- dif.del4del80[n1,]
+n3 <- cbind(fc.d8,n2);colnames(n3) <- c("del80","del80del4")
+n4 <- transform(n3,minus=n3$del80-n3$del80del4)
+n5 <- subset(n4,minus>1)    # 100 genes
+n55 <- subset(n4,minus>1.5) # 91 genes
+n6 <- subset(n4,minus>2)    # 70 genes
+n7 <- subset(n4,minus>2.5)  # 48 genes 
+n8 <- subset(n4,minus>3)    # 36 genes
+write.table(n5,file="pho4-d8cans-2F.txt",sep='\t',quote=F)
+write.table(n6,file="pho4-d8cans-4F.txt",sep='\t',quote=F)
+write.table(n8,file="pho4-d8cans-8F.txt",sep='\t',quote=F)
+### compare the candidate list between del80 and phosphate-starvation conditions
+degm5 <- fread("../sandbox/pho4-cans-2F.txt")
+degn5 <- fread("../sandbox/pho4-d8cans-2F.txt")
+pho4.fc.minu2 <-intersect(degn5$V1,degm5$V1) #30genes
+wtol.minus2 <- setdiff(degm5$V1,degn5$V1) #91 genes
+d8ol.minus2 <- setdiff(degn5$V1,degm5$V1) #70 genes
+
+degm6 <- fread("../sandbox/pho4-cans-4F.txt")
+degn6 <- fread("../sandbox/pho4-d8cans-4F.txt")
+pho4.fc.minu4 <-intersect(degn6$V1,degm6$V1) #11
+wtol.minus4 <- setdiff(degm6$V1,degn6$V1) #16 genes
+d8ol.minus4 <- setdiff(degn6$V1,degm6$V1) #59 genes
+
+degm8 <- fread("../sandbox/pho4-cans-8F.txt")
+degn8 <- fread("../sandbox/pho4-d8cans-8F.txt")
+pho4.fc.minu8 <-intersect(degn8$V1,degm8$V1) #5
+wtol.minus8 <- setdiff(degm8$V1,degn8$V1) #5 genes
+d8ol.minus8 <- setdiff(degn8$V1,degm8$V1) #31 genes
+```
+## 6.3 (Test!) Using flat slope method to find the definite and direct Pho4 target candidates
+```{r}
+wt.all <- fread("../sandbox/all-wt.txt")
+del4.all <- fread("../sandbox/all-del4.txt")
+wt.all <- wt.all[,1:10]
+act.wt <- which(wt.all$wtvswt.30min>=0&wt.all$wtvswt.20min>=0)
+act.wt <- wt.all[act.wt]
+f1 <- match(act.wt$genes,del4.all$genes)
+f2 <- del4.all[f1,]
+f2 <- f2[,1:10]
+my.vec <- c("Timepoint",30,45,60,90,120)
+x <- c(f2[2,3:7]); x <- as.numeric(f2[2,3:7]) # do not use rbind because r store vectors in column rather than row; and when combine rows together, the attributes of each elements inside a vector should be same, otherwise it cannot be combined
+x <- c(f2[1,3:7]); x <- as.numeric(f2[1,3:7])
+y = x
+x = as.numeric(my.vec[-1])
+lm <- lm(y~x)
+summary(lm)
+ms <- summary(lm)
+coe1 <- ms$coefficients
+z1 <- coe1["x","Estimate"]
+
+x <- c(f2[i,2]); x <- as.numeric(f2[i,2])
+storage<-numeric(6)
+for(i in 1:3){
+  x <- c(f2[i,2:3]); x <- as.numeric(f2[i,2:3])
+  storage[i] <- x
+}
+```
+# 7. visualize DEGs dynamics in wt and del80 groups
+```{r}
+## this file contains subfunctions to be sourced into the main analysis for Ex009
+sample[,Timepoint:=factor(Timepoint, levels = c("pre","20m","30m","45m","60m","90m","120m","150m","180m","240m"))] ## ,"del80"
+sample[,Group:=paste(Genotype,Timepoint, sep=".")]
+## normalize all the data with TMM together
+### 1. construct count matrix
+dge <- DGEList( counts = mat, genes = anno )
+### 2. perform TMM normalization
+dge <- calcNormFactors(dge)
+### 3. use TMM to normalize data
+lcpm <- cpm( dge, normalized.lib.sizes = T, log = T, prior.count = 0.5)
+rownames(lcpm) <- anno$GeneID
+myGenePlot <- function(lc = lcpm, genes = "CAGL0B02475g", sp = sample) {
+  # this function takes in the read count matrix (normalized and transformed) and a gene ID
+  # and plots the values stratified by genotype and timepoint
+  dat <- rbind( lc[genes,sp$Sample] )   # extract the subset of genes used for plotting
+  rownames(dat) <- genes
+  dt <- data.table(sp[,.(Sample, Genotype, Timepoint)], t(dat))
+  dtm <- melt(dt, id = 1:3, variable.name = "GeneID")
+  p <- ggplot( dtm, aes( x = Timepoint, y = value, color = Genotype ) )
+  print( 
+    p + geom_point() + geom_smooth(method = "loess", aes(x = as.numeric(Timepoint), y = value, color = Genotype)) + ylab("log2 count per million") + facet_wrap( ~ GeneID ) + theme(axis.text.x = element_text(angle = 90, size = rel(0.5)))
+  )
+}
+```
+
+```{r}
+## Msn2/4 and its downstream targets
+## Msn2 & Msn4 & Ap1(ScYap1) & Skn7 & cta1 & Tsa1
+myGenePlot(genes = c("CAGL0F05995g","CAGL0M13189g","CAGL0H04631g","CAGL0F09097g","CAGL0K10868g","CAGL0K06259g"))
+## Msn2 & Msn4 & GLK1 & SSA3(could be independent in some case) & TPS2 & TPS1 
+myGenePlot(genes = c("CAGL0F05995g","CAGL0M13189g","CAGL0F00605g","CAGL0G03289g","CAGL0J09812g","CAGL0G05335g","CAGL0J09812g"))
+## Msn2 & Msn4 & HSP12 & ALD5 & SOD2 & PGM2 & HXK1 
+myGenePlot(genes = c("CAGL0F05995g","CAGL0M13189g","CAGL0J04202g","CAGL0J03212g","CAGL0E04356g","CAGL0K03421g","CAGL0A04829g"))
+## Msn2 & Msn4 & HSP12 & PGM2 
+myGenePlot(genes = c("CAGL0F05995g","CAGL0M13189g","CAGL0J04202g","CAGL0K03421g"))
+
+## A'∩B log2=1 
+myGenePlot(genes = c("CAGL0C00110g","CAGL0E01705g","CAGL0L08547g","CAGL0C05643g","CAGL0E06292g","CAGL0L03267g","CAGL0J06028g","CAGL0L03157g","CAGL0E05632g","CAGL0K05390g","CAGL0I00286g","CAGL0M00880g"))
+myGenePlot(genes = c("CAGL0I10747g","CAGL0I10791g","CAGL0E03850g","CAGL0M12881g","CAGL0L00583g","CAGL0F05863g","CAGL0D01958g","CAGL0K08338g","CAGL0J03212g","CAGL0G01320g","CAGL0G04763g"))
+## A'∩C 
+myGenePlot(genes = c("CAGL0A02321g","CAGL0M01166g","CAGL0L00671g","CAGL0G04081g","CAGL0E03630g","CAGL0C05071g","CAGL0I09086g","CAGL0M11308g","CAGL0K08844g","CAGL0L10362g","CAGL0D00286g","CAGL0J06358g","CAGL0J03916g","CAGL0M08866g","CAGL0L10043g","CAGL0L12606g","CAGL0L01089g","CAGL0G01122g","CAGL0M04499g","CAGL0K02563g","CAGL0K01507g"))
+myGenePlot(genes = c("CAGL0K07876g","CAGL0M00968g","CAGL0L06358g","CAGL0H03003g","CAGL0M00616g","CAGL0L06666g","CAGL0C02519g","CAGL0H08129g","CAGL0D00770g","CAGL0A02838g","CAGL0J11484g","CAGL0K10714g","CAGL0H03795g","CAGL0I05632g","CAGL0I08613g","CAGL0F06875g","CAGL0I00836g","CAGL0E01023g","CAGL0L05676g"))
+myGenePlot(genes = c("CAGL0E04312g","CAGL0E03003g","CAGL0I09724g","CAGL0M00154g","CAGL0I04972g","CAGL0K06039g","CAGL0F01419g","CAGL0I00418g","CAGL0M08492g","CAGL0K08228g","CAGL0I03652g","CAGL0I03476g","CAGL0M07403g","CAGL0A02904g","CAGL0F04521g","CAGL0B00616g","CAGL0G03333g","CAGL0J03740g","CAGL0J00429g","CAGL0D00264g","CAGL0B00726g"))
+myGenePlot(genes = c("CAGL0K05357g","CAGL0G08448g","CAGL0C02607g","CAGL0C01243g","CAGL0A01089g","CAGL0B00902g","CAGL0E05632g","CAGL0L09999g","CAGL0I09108g","CAGL0G01320g","CAGL0M05533g","CAGL0L08954g","CAGL0D01958g","CAGL0G06930g","CAGL0F01859g","CAGL0A03410g","CAGL0E03762g","CAGL0E03740g","CAGL0E06248g","CAGL0K12430g","CAGL0C03740g","CAGL0A03102g","CAGL0F05027g"))
+myGenePlot(genes = c("CAGL0G04279g","CAGL0G05588g","CAGL0K08338g","CAGL0F02167g","CAGL0E03784g","CAGL0D05654g","CAGL0I09680g","CAGL0L07898g","CAGL0M04103g","CAGL0L09383g","CAGL0L12694g","CAGL0I06644g","CAGL0F07953g","CAGL0H06017g","CAGL0H04851g","CAGL0K12716g","CAGL0A03806g","CAGL0L12166g","CAGL0I04994g","CAGL0H10164g","CAGL0C00693g"))
+myGenePlot(genes = c("CAGL0H10450g","CAGL0M10153g","CAGL0J09680g","CAGL0F02651g","CAGL0I00484g","CAGL0J11616g","CAGL0J02706g","CAGL0C01919g","CAGL0B02079g","CAGL0C02057g","CAGL0D01694g","CAGL0B02651g","CAGL0G04125g","CAGL0C05577g","CAGL0L11286g","CAGL0H09922g","CAGL0M01452g","CAGL0F06589g","CAGL0E03894g","CAGL0H02959g","CAGL0L09537g","CAGL0I03586g","CAGL0J09944g"))
+myGenePlot(genes = c("CAGL0B04235g","CAGL0F08217g","CAGL0D00462g","CAGL0F02607g","CAGL0G00462g","CAGL0M09471g","CAGL0H03135g","CAGL0K09350g","CAGL0H03575g","CAGL0L01463g","CAGL0F04917g","CAGL0B01969g","CAGL0F07579g","CAGL0K03355g","CAGL0J09174g","CAGL0C03575g","CAGL0M13387g","CAGL0F00649g","CAGL0M07359g","CAGL0H09614g","CAGL0M03421g"))
+myGenePlot(genes = c("CAGL0A03300g","CAGL0B00462g","CAGL0K03905g","CAGL0I06116g","CAGL0M13266g","CAGL0D03762g","CAGL0M08778g","CAGL0J06402g","CAGL0C00946g","CAGL0J01800g","CAGL0L06336g","CAGL0D05236g","CAGL0B01875g","CAGL0A02233g","CAGL0D05720g","CAGL0D04356g","CAGL0B00715g","CAGL0M11000g","CAGL0F05137g","CAGL0E01705g","CAGL0L13266g","CAGL0G03905g","CAGL0K05247g"))
+myGenePlot(genes = c("CAGL0I07249g","CAGL0H00759g","CAGL0H10054g","CAGL0G05522g","CAGL0A00649g","CAGL0J11891g","CAGL0F09141g","CAGL0J02024g","CAGL0F08745g","CAGL0C02629g","CAGL0A02475g","CAGL0C04785g","CAGL0K07568g"))
+
+```
+
+```{r}
+## B∩C 41 genes
+myGenePlot(genes = c("CAGL0L04378g","CAGL0A01650g","CAGL0D06600g","CAGL0I07865g","CAGL0M11660g","CAGL0F07777g","CAGL0E01881g","CAGL0L05434g","CAGL0K08844g","CAGL0G02717g","CAGL0H08844g","CAGL0K10164g"))
+myGenePlot(genes = c("CAGL0J04004g","CAGL0E01859g","CAGL0G01540g","CAGL0G01738g","CAGL0J02508g","CAGL0H02101g","CAGL0G04433g","CAGL0E05984g","CAGL0K03421g","CAGL0K07546g","CAGL0H08173g","CAGL0C05027g"))
+myGenePlot(genes = c("CAGL0K04301g","CAGL0J04202g","CAGL0K03069g","CAGL0E05632g","CAGL0A01606g","CAGL0B02475g","CAGL0F00605g","CAGL0G06050g","CAGL0J02552g","CAGL0G02739g","CAGL0I00726g","CAGL0A00737g"))
+myGenePlot(genes = c("CAGL0M03305g","CAGL0E04554g","CAGL0B02882g","CAGL0E01705g","CAGL0K04257g"))
+## B'∩C 525 genes 
+myGenePlot(genes = c("CAGL0I05390g","CAGL0F05071g","CAGL0M01166g","CAGL0G04081g","CAGL0M12793g","CAGL0G05698g","CAGL0M13541g","CAGL0E03630g","CAGL0C05071g"))
+myGenePlot(genes = c("CAGL0I09086g","CAGL0K11275g","CAGL0J09284g","CAGL0C04191g","CAGL0E05148g","CAGL0A01870g","CAGL0C05555g","CAGL0E02651g","CAGL0H07469g"))
+myGenePlot(genes = c("CAGL0I05896g","CAGL0M08228g","CAGL0F08261g","CAGL0H02893g","CAGL0E01089g","CAGL0H08063g","CAGL0I05962g","CAGL0L03135g","CAGL0M11308g"))
+### (B'∩C)∩A 376 genes 
+myGenePlot(genes = c("CAGL0M13541g","CAGL0F05071g","CAGL0G05698g","CAGL0I05390g","CAGL0K11275g","CAGL0M12793g","CAGL0D00990g","CAGL0C04191g","CAGL0A01870g"))
+myGenePlot(genes = c("CAGL0F07799g","CAGL0K05137g","CAGL0H07469g","CAGL0E05148g","CAGL0I06138g","CAGL0K07590g","CAGL0E04708g","CAGL0K08162g","CAGL0C05555g"))
+myGenePlot(genes = c("CAGL0I05962g","CAGL0C01793g","CAGL0K04235g","CAGL0H02893g","CAGL0I05896g","CAGL0F03113g","CAGL0F07117g","CAGL0M08228g","CAGL0J01331g"))
+myGenePlot(genes = c("CAGL0C01771g","CAGL0M13783g","CAGL0J04884g","CAGL0M05665g","CAGL0L06006g","CAGL0M13761g","CAGL0M10439g","CAGL0G05335g","CAGL0L02717g"))
+myGenePlot(genes = c("CAGL0L10582g","CAGL0M04675g","CAGL0F03707g","CAGL0J02948g","CAGL0E02651g","CAGL0H08063g","CAGL0I04444g","CAGL0G08624g","CAGL0I01980g"))
+```
+
+```{r}
+## Genes from Set A that fit in 79 genes list
+### log2=1.5
+myGenePlot(genes = c("CAGL0B02475g","CAGL0A01650g","CAGL0G06952g","CAGL0K07546g","CAGL0J07040g","CAGL0A01243g","CAGL0L05456g","CAGL0C02321g","CAGL0F02145g","CAGL0E05588g","CAGL0J06050g","CAGL0K07458g","CAGL0M12705g","CAGL0L06644g","CAGL0I00748g"))
+myGenePlot(genes = c("CAGL0C04939g","CAGL0M11660g","CAGL0E01837g","CAGL0G01540g","CAGL0K12034g","CAGL0K07524g","CAGL0J08294g","CAGL0G04829g","CAGL0E05566g","CAGL0K10164g","CAGL0H08778g","CAGL0G06050g","CAGL0F08107g","CAGL0M13189g","CAGL0D04378g"))
+myGenePlot(genes = c("CAGL0B02453g","CAGL0E04884g","CAGL0M08552g","CAGL0J04202g","CAGL0L06622g","CAGL0H01177g","CAGL0K04301g","CAGL0I05698g","CAGL0A01606g","CAGL0H00682g","CAGL0C01397g","CAGL0E04548g","CAGL0F00605g","CAGL0L08932g","CAGL0B02970g"))
+myGenePlot(genes = c("CAGL0A00517g","CAGL0H00704g","CAGL0M06325g","CAGL0K10604g","CAGL0D05434g","CAGL0I00726g","CAGL0K07480g","CAGL0B02926g","CAGL0D06512g","CAGL0M12474g","CAGL0D01276g","CAGL0M07634g","CAGL0I00902g","CAGL0E01177g","CAGL0M01870g","CAGL0E04554g"))
+```
+
+----
+myGenePlot(genes = c())
+myGenePlot(genes = c())
+myGenePlot(genes = c())
+myGenePlot(genes = c())
+myGenePlot(genes = c())
+myGenePlot(genes = c())
+myGenePlot(genes = c())
+## 7.0 PSR Pho4 independent upregulated genes (TM-all&set concepts)
+```{r}
+myGenePlot(genes = c("CAGL0E02651g","CAGL0F08261g","CAGL0L05434g","CAGL0J04004g","CAGL0A02145g","CAGL0H02101g","CAGL0G02563g","CAGL0B01925g","CAGL0H02563g","CAGL0D04026g","CAGL0J11550g","CAGL0F04719g","CAGL0A02002g","CAGL0L02761g","CAGL0B01078g","CAGL0L05786g","CAGL0D00198g","CAGL0L06094g","CAGL0J03080g","CAGL0I05610g","CAGL0M11902g","CAGL0M12551g")) # Pho4 independent genes but activated during phosphate starvation with an expression >log2(0.6), co5 22 genes
+myGenePlot(genes = c("CAGL0C04191g","CAGL0D05082g","CAGL0E05148g","CAGL0I07865g","CAGL0G05544g","CAGL0I05896g","CAGL0F07777g","CAGL0L02827g","CAGL0L02717g"))
+myGenePlot(genes = c("CAGL0C02321g","CAGL0L00957g","CAGL0L10582g","CAGL0G09020g","CAGL0M04675g","CAGL0G05335g","CAGL0H08888g","CAGL0K10164g","CAGL0B02563g")) # part of co6
+
+
+## 7.00 (TMM-all) early and late activated genes
+```{r}
+### lately activated se84 fd>1.5
+myGenePlot(genes = c("CAGL0A01650g","CAGL0L06644g","CAGL0I00748g","CAGL0M11660g","CAGL0K07524g","CAGL0E05984g","CAGL0G02057g","CAGL0G05984g","CAGL0E00275g","CAGL0E03366g","CAGL0D04400g","CAGL0M03305g","CAGL0L09295g")) #"CAGL0M02915g","CAGL0C00209g","CAGL0A03586g","CAGL0K07678g","CAGL0A03905g","CAGL0G02739g"
+### early activated genes se774
+myGenePlot(genes = c("CAGL0B02475g","CAGL0K07546g","CAGL0A01243g","CAGL0I04554g","CAGL0D00990g","CAGL0L05456g","CAGL0G06050g","CAGL0D04378g","CAGL0B02453g","CAGL0I03872g","CAGL0K09372g","CAGL0B02970g","CAGL0M02871g","CAGL0B02926g"))#,"CAGL0D01254g","CAGL0L07194g","CAGL0E00803g","CAGL0G03883g"
+```
+## 7.1 TMM-all
+```{r}
+### TMM-all >=log2(2.5) FC
+myGenePlot(genes = c("CAGL0A01243g","CAGL0B02475g","CAGL0K07546g","CAGL0K07524g","CAGL0I04554g","CAGL0G06050g","CAGL0B02926g","CAGL0D04400g","CAGL0L09295g"))
+### TMM-all log2(2)<=FC<=Log2(2.5)
+myGenePlot(genes = c("CAGL0L05456g","CAGL0M11660g","CAGL0L06644g","CAGL0M02915g","CAGL0G02057g","CAGL0G05984g","CAGL0C00209g","CAGL0E00803g","CAGL0E03366g","CAGL0M02871g","CAGL0D01254g"))
+### TMM-all log2(1.5)<=FC<=Log2(2)
+myGenePlot(genes = c("CAGL0A01650g","CAGL0I00748g","CAGL0M12705g","CAGL0D00990g","CAGL0H01177g","CAGL0D04378g","CAGL0B02970g","CAGL0I03872g","CAGL0K07678g","CAGL0E05984g","CAGL0M03305g"))#
+### TMM-all log2(1)<=FC<=Log2(1.5)
+myGenePlot(genes = c("CAGL0G06952g","CAGL0J07040g","CAGL0C02739g","CAGL0L04378g","CAGL0L12144g","CAGL0H08778g","CAGL0H02387g","CAGL0F07117g","CAGL0F02145g"))
+myGenePlot(genes = c("CAGL0I05148g","CAGL0L00737g","CAGL0M12925g","CAGL0K06237g","CAGL0J04884g","CAGL0K12562g","CAGL0E05588g","CAGL0G09262g","CAGL0B03014g","CAGL0J04202g"))
+myGenePlot(genes = c("CAGL0C04939g","CAGL0B02453g","CAGL0C01551g","CAGL0G03289g","CAGL0L05258g","CAGL0G03883g","CAGL0B02981g","CAGL0H09218g","CAGL0F02387g"))
+myGenePlot(genes = c("CAGL0L06622g","CAGL0J00451g","CAGL0M05137g","CAGL0B04675g","CAGL0F01221g","CAGL0K09372g","CAGL0K04785g","CAGL0F04631g","CAGL0F04191g"))
+myGenePlot(genes = c("CAGL0M06347g","CAGL0E00275g","CAGL0E01793g","CAGL0K04257g","CAGL0I04576g","CAGL0A03586g","CAGL0L07194g","CAGL0B02904g","CAGL0M04213g","CAGL0K13002g"))
+myGenePlot(genes = c("CAGL0L06644g","CAGL0B02453g","CAGL0I03872g","CAGL0L12144g","CAGL0M12925g","CAGL0K09372g")) # can all be found the minus-all.txt with minus larger than 1
+```
+```{r}
+### TMM-all log2(0.7)<=FC<=Log2(1)
+myGenePlot(genes = c("CAGL0C02321g","CAGL0M10351g","CAGL0G01716g","CAGL0K04235g","CAGL0M09449g","CAGL0C00275g","CAGL0H00704g","CAGL0G02101g","CAGL0J02508g"))
+myGenePlot(genes = c("CAGL0C05027g","CAGL0I02530g","CAGL0M05951g","CAGL0K04719g","CAGL0M08844g","CAGL0D00946g","CAGL0K10824g","CAGL0E05566g","CAGL0K02893g"))
+myGenePlot(genes = c("CAGL0J09900g","CAGL0J01699g","CAGL0H08305g","CAGL0H04719g","CAGL0H02519g","CAGL0M08822g","CAGL0C01397g"))
+myGenePlot(genes = c("CAGL0M14091g","CAGL0L04686g","CAGL0A01606g","CAGL0H01606g","CAGL0J06314g","CAGL0K08800g","CAGL0A01284g","CAGL0H06545g","CAGL0G08426g"))
+myGenePlot(genes = c("CAGL0E04548g","CAGL0G02695g","CAGL0F08041g","CAGL0J02552g","CAGL0C03311g","CAGL0L07722g","CAGL0A01366g","CAGL0G09251g","CAGL0H06831g"))
+myGenePlot(genes = c("CAGL0K01683g","CAGL0J02530g","CAGL0A01111g","CAGL0I02024g","CAGL0K03201g","CAGL0L11990g","CAGL0H05995g","CAGL0B02948g","CAGL0I04004g"))
+myGenePlot(genes = c("CAGL0I00726g","CAGL0E06182g","CAGL0G08195g","CAGL0K00170g","CAGL0E01177g","CAGL0G06182g","CAGL0K08036r"))
+```
+```{r}
+#### log2FC between 1.62 to 2
+myGenePlot(genes = c("CAGL0K11275g","CAGL0C02321g","CAGL0M13541g","CAGL0F00605g","CAGL0M10351g","CAGL0D06600g","CAGL0G01716g","CAGL0K07458g"))
+myGenePlot(genes = c("CAGL0C01661g","CAGL0I07865g","CAGL0L04664g","CAGL0K12034g","CAGL0E06072g","CAGL0K07590g","CAGL0J01331g","CAGL0J04004g"))
+myGenePlot(genes = c("CAGL0C01793g","CAGL0D03520g","CAGL0G01738g","CAGL0M08552g","CAGL0F08107g","CAGL0J08954g","CAGL0I01496g","CAGL0A01870g"))
+myGenePlot(genes = c("CAGL0G02849g","CAGL0M05665g","CAGL0K06259g","CAGL0F00869g","CAGL0M05951g","CAGL0D03542g","CAGL0L01265g","CAGL0F04807g"))
+```
+```{r}
+#### log2FC between 2 to 2.8 max log2FC
+myGenePlot(genes = c("CAGL0J07040g","CAGL0C02739g","CAGL0L04378g","CAGL0K04235g","CAGL0L12144g","CAGL0H08778g","CAGL0H02387g","CAGL0F07117g","CAGL0M09449g"))
+myGenePlot(genes = c("CAGL0B02860g","CAGL0C00275g","CAGL0H00704g","CAGL0F02145g","CAGL0I05148g","CAGL0G02101g","CAGL0J02508g","CAGL0K06237g","CAGL0D00946g"))
+myGenePlot(genes = c("CAGL0K12562g","CAGL0C05027g","CAGL0E05588g","CAGL0K04037g","CAGL0I02530g","CAGL0B03014g","CAGL0M08844g","CAGL0K10824g","CAGL0E05566g"))
+myGenePlot(genes = c("CAGL0J09900g","CAGL0H04719g","CAGL0H02519g","CAGL0H09218g","CAGL0M08822g","CAGL0C01397g","CAGL0F02387g","CAGL0L06622g","CAGL0E04884g"))
+myGenePlot(genes = c("CAGL0M14091g","CAGL0A01606g","CAGL0H01606g","CAGL0K03459g","CAGL0M05137g","CAGL0B04675g","CAGL0A01284g","CAGL0F01221g","CAGL0H06545g"))
+#### log2FC between 2 to 2.8 2ndmax log2FC
+myGenePlot(genes = c("CAGL0J07040g","CAGL0C02739g","CAGL0L04378g","CAGL0K04235g","CAGL0L12144g","CAGL0H08778g","CAGL0H02387g","CAGL0F07117g","CAGL0C00275g"))
+myGenePlot(genes = c("CAGL0F02145g","CAGL0I05148g","CAGL0L00737g","CAGL0M12925g","CAGL0K06237g","CAGL0K12562g","CAGL0C05027g","CAGL0E05588g","CAGL0G09262g"))
+myGenePlot(genes = c("CAGL0B03014g","CAGL0J04202g","CAGL0C01551g","CAGL0G03289g","CAGL0K10824g","CAGL0L05258g","CAGL0B02981g","CAGL0H09218g","CAGL0C01397g"))
+myGenePlot(genes = c("CAGL0F02387g","CAGL0L06622g","CAGL0J00451g","CAGL0M05137g","CAGL0B04675g","CAGL0F01221g","CAGL0K04785g","CAGL0F04631g","CAGL0F04191g"))
+myGenePlot(genes = c("CAGL0M06347g","CAGL0E00275g","CAGL0E01793g","CAGL0H06831g","CAGL0K01683g","CAGL0K03201g","CAGL0K04257g","CAGL0I04576g","CAGL0A03586g"))
+```
+```{r}
+#### log2FC between 2.8 to 4
+myGenePlot(genes = c("CAGL0A01650g","CAGL0G06952g","CAGL0I00748g","CAGL0M12705g","CAGL0L00737g","CAGL0M12925g","CAGL0J04884g","CAGL0G09262g"))
+myGenePlot(genes = c("CAGL0H01177g","CAGL0J04202g","CAGL0C04939g","CAGL0B02453g","CAGL0C01551g","CAGL0G03289g","CAGL0L05258g","CAGL0G03883g"))
+myGenePlot(genes = c("CAGL0D04378g","CAGL0B02981g","CAGL0L04686g","CAGL0J00451g","CAGL0K09372g","CAGL0F04191g","CAGL0E00275g","CAGL0K04257g"))
+myGenePlot(genes = c("CAGL0L11990g","CAGL0A03586g","CAGL0L07194g","CAGL0K00170g","CAGL0B02904g","CAGL0K13002g"))
+```
+## 7.2 visualize the most significant log2FC via max log2FC method
+```{r}
+## 8 FC difference
+myGenePlot(genes = c("CAGL0A01243g","CAGL0B02475g","CAGL0K07546g","CAGL0K07524g","CAGL0I04554g","CAGL0G06050g","CAGL0B02926g","CAGL0C00209g","CAGL0D04400g","CAGL0L09295g"))
+## EPA gene difference
+myGenePlot(genes = c("CAGL0E06644g","CAGL0C00110g","CAGL0C05643g","CAGL0C00847g","CAGL0A01366g","CAGL0A01284g","CAGL0L13299g","CAGL0M00132g","CAGL0L13332g","CAGL0J11968g","CAGL0E00275g","CAGL0K00170g","CAGL0I00220g"))
+## EPA1,6,7,20
+myGenePlot(genes = c("CAGL0E06644g","CAGL0C00110g","CAGL0C05643g","CAGL0E00275g"))
+## EPA6,EPA7, SIR3, RIF1
+myGenePlot(genes = c("CAGL0C00110g","CAGL0C05643g","CAGL0M00770g","CAGL0B03399g"))
+## Bmt1,2,3,4,5,6,7
+myGenePlot(genes = c("CAGL0D00286g","CAGL0B02882g","CAGL0B02926g","CAGL0B02948g","CAGL0B02970g","CAGL0B02904g","CAGL0K12980g"))
+## intersection of pho4 dependent DEGs in del80 and no-Pi conditions
+### 8 FC difference
+myGenePlot(genes = c("CAGL0A01243g","CAGL0B02475g","CAGL0K07546g","CAGL0B02926g","CAGL0G06050g"))
+### 4 FC difference
+myGenePlot(genes = c("CAGL0M11660g","CAGL0A01243g","CAGL0B02475g","CAGL0K07546g","CAGL0B02926g","CAGL0G06050g","CAGL0E05984g","CAGL0M02915g","CAGL0E03366g","CAGL0L05456g","CAGL0C00209g"))
+## genes only activated in pho80 deleted groups (3list)
+myGenePlot(genes = c("CAGL0K10164g","CAGL0E04554g","CAGL0I10791g","CAGL0G01540g","CAGL0K04301g","CAGL0F00649g","CAGL0M13189g"))
+
+```
+## 7.3 visualize mildly induced DEGs according to clustered heatmap of lfc=log2(4)&P<0.05 of wt DEGs, FC value was set to be saturated to 4.
+```{r}
+###selected mildly induced from heatmap
+#### >=log2(7)
+myGenePlot(genes = c("CAGL0H05379g","CAGL0K01683g","CAGL0L06644g","CAGL0B02453g","CAGL0K09878g","CAGL0H05379g","CAGL0K01683g"))
+#### log2(4)<= <=log2(7)
+myGenePlot(genes = c("CAGL0L12144g","CAGL0G08426g","CAGL0I03872g","CAGL0J11176g","CAGL0M12925g","CAGL0G01716g"))
+#### <=log2(2)
+myGenePlot(genes = c("CAGL0K04785g","CAGL0K08036r","CAGL0F00341g","CAGL0L07766g","CAGL0A03586g","CAGL0E01749g"))
+#### del80 is very different to wt,might still be activated after 4 hours
+myGenePlot(genes = c("CAGL0B01100g","CAGL0D01276g","CAGL0K04037g","CAGL0I09284g"))
+###del80 is very different to wt, do not know how to explain
+myGenePlot(genes = c("CAGL0M13717g","CAGL0I10098g","CAGL0C04719g","CAGL0D01837g","CAGL0L10142g","CAGL0J07953r"))
+```
+## 7.4 the overall Pho4 targets (Set concepts)(PSR+other responses)
+```{r}
+### A∪B-((Complementary Set of B)∩C)∩A log2=0.85 370+25=395 genes; log2=1 252+23=275 genes; log2=1.8 252+16=268 genes;
+del80.pho4 <- del80.fc[!del80.fc[,1] %in% onlycmod[,1],] #log2=0.85 182 genes; log2=1 149 genes; ; log2=1.8 60 genes
+wt.pho4 <- wt.fc[!wt.fc[,1] %in% onlycmod[,1],] #log2=0.85 370 genes; log2=1 363 genes; log2=1.8 252 genes;\
+test1 <- del80.fc[!del80.pho4[,1] %in% wt.pho4[,1],] #log2=0.85 25 genes, 15 genes; log2=1 23 genes
+### Pho4 overall targets (PSR+Other) = genes from test1&wt.pho4
+### Pho4 targets (PSR) = genes from wt.pho4
+### Pho4 targets log2=1
+myGenePlot(genes = c("CAGL0B02475g","CAGL0A01650g","CAGL0G06952g","CAGL0K07546g","CAGL0J07040g","CAGL0A01243g","CAGL0C02739g","CAGL0M10351g","CAGL0A02321g"))
+myGenePlot(genes = c("CAGL0K12254g","CAGL0C01661g","CAGL0D06600g","CAGL0I04554g","CAGL0L00737g","CAGL0L05456g","CAGL0L04378g","CAGL0L04598g","CAGL0C02321g"))
+myGenePlot(genes = c("CAGL0F03685g","CAGL0F02145g","CAGL0E05588g","CAGL0I07865g","CAGL0G05544g","CAGL0D05082g","CAGL0F07777g","CAGL0L12144g","CAGL0J06050g"))
+myGenePlot(genes = c("CAGL0C04543g","CAGL0K07458g","CAGL0K11968g","CAGL0D03520g","CAGL0H02387g","CAGL0M12705g","CAGL0G09977g","CAGL0L05016g","CAGL0L06644g"))
+myGenePlot(genes = c("CAGL0D03542g","CAGL0E01881g","CAGL0I00748g","CAGL0J08547g","CAGL0C04939g","CAGL0D04070g","CAGL0H08844g","CAGL0L02827g","CAGL0J11176g"))
+### Pho4 targets log2=1.8
+myGenePlot(genes = c("CAGL0B02475g","CAGL0A01650g","CAGL0G06952g","CAGL0K07546g","CAGL0J07040g","CAGL0G01716g","CAGL0A01243g","CAGL0M09449g","CAGL0C02739g"))
+myGenePlot(genes = c("CAGL0M10351g","CAGL0K12254g","CAGL0L06204g","CAGL0D06600g","CAGL0I04554g","CAGL0L00737g","CAGL0L05456g","CAGL0L04378g","CAGL0L04598g"))
+myGenePlot(genes = c("CAGL0C02321g","CAGL0F02145g","CAGL0E05588g","CAGL0I07865g","CAGL0G05544g","CAGL0D05082g","CAGL0F07777g","CAGL0J06050g","CAGL0C04543g"))
+myGenePlot(genes = c("CAGL0K07458g","CAGL0K01221g","CAGL0H02387g","CAGL0M12705g","CAGL0G09977g","CAGL0L05016g","CAGL0L06644g","CAGL0E01881g","CAGL0I00748g"))
+myGenePlot(genes = c("CAGL0J08547g","CAGL0C04939g","CAGL0H08844g","CAGL0L02827g","CAGL0K04037g","CAGL0J11176g","CAGL0M06259g","CAGL0M11660g","CAGL0B02563g"))
+#### test1 log2=1.8
+myGenePlot(genes = c("CAGL0K08844g","CAGL0K05390g","CAGL0M02629g","CAGL0C00110g","CAGL0D05170g","CAGL0L03267g","CAGL0E05632g","CAGL0J06028g","CAGL0L02321g","CAGL0E06292g","CAGL0L03157g","CAGL0E01705g","CAGL0L08547g","CAGL0C05643g","CAGL0J00847g","CAGL0I00286g"))
+```
+## 7.5 Genes activated in A'∩B and A∩B
+```{r}
+## A'∩B log2=0.85 25 genes
+myGenePlot(genes = c("CAGL0K05390g","CAGL0C00110g","CAGL0I10747g","CAGL0L03267g","CAGL0M00880g","CAGL0E05632g","CAGL0F05863g","CAGL0G04763g","CAGL0D01958g","CAGL0J06028g","CAGL0E06292g","CAGL0E03850g","CAGL0F04499g","CAGL0I10791g","CAGL0L03157g","CAGL0L00583g","CAGL0H00418g","CAGL0L08547g","CAGL0M12881g","CAGL0C05643g","CAGL0K08338g","CAGL0H02255g","CAGL0I00286g","CAGL0J03212g","CAGL0K00715g"))
+## A'∩B log2=1 23 genes
+myGenePlot(genes = c("CAGL0K05390g","CAGL0C00110g","CAGL0I10747g","CAGL0L03267g","CAGL0M00880g","CAGL0E05632g","CAGL0F05863g","CAGL0G04763g","CAGL0D01958g","CAGL0J06028g","CAGL0E06292g","CAGL0E03850g","CAGL0I10791g","CAGL0L03157g","CAGL0L00583g","CAGL0E01705g","CAGL0G01320g","CAGL0L08547g","CAGL0M12881g","CAGL0C05643g","CAGL0K08338g","CAGL0I00286g","CAGL0J03212g"))
+## A∩B log2=1 part of 126 genes
+myGenePlot(genes = c("CAGL0A01243g","CAGL0B02475g","CAGL0K07546g","CAGL0G06952g","CAGL0L05456g","CAGL0G01540g","CAGL0M11660g","CAGL0I04554g","CAGL0J07040g","CAGL0A01650g","CAGL0K08844g","CAGL0M12705g","CAGL0M10351g","CAGL0D06600g","CAGL0B02453g"))
+
+myGenePlot(genes = c("CAGL0J08294g","CAGL0F02145g","CAGL0F02387g","CAGL0M02629g","CAGL0G02717g","CAGL0G04433g","CAGL0D05170g","CAGL0K12254g","CAGL0I00748g","CAGL0H08844g","CAGL0J02508g","CAGL0L04378g","CAGL0K07524g","CAGL0G06050g","CAGL0L05434g"))
+
+myGenePlot(genes = c("CAGL0K03069g","CAGL0C02321g","CAGL0F06941g","CAGL0L04664g","CAGL0E01881g","CAGL0K12034g","CAGL0J08316g","CAGL0E01793g","CAGL0M02871g","CAGL0K10164g","CAGL0J11176g","CAGL0I07865g","CAGL0C02739g","CAGL0A02321g","CAGL0A01606g"))
+```
+# 8.get heatmap of foldchange in DEGs
+```{r}
+dif.wt<-read.table("wt-DEGs.txt",
+                    sep='\t',header=T,row.names=1)
+dif.wt<-dif.wt[,1:9]
+pheatmap(dif.wt,
+         color=colorRampPalette(c("blue","black","yellow"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="none",
+         border_color=NA,cluster_col = FALSE)
+
+dif.wt2<-read.table("wt-4FC.txt",
+                    sep='\t',header=T,row.names=1)
+dif.wt2<-dif.wt2[,1:9]
+pheatmap(dif.wt2,
+         color=colorRampPalette(c("blue","black","yellow"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="none",
+         border_color=NA,cluster_col = FALSE)
+
+dif.del4 <-read.table("del4-DEGs.txt",
+                    sep='\t',header=T,row.names=1)
+dif.del4<-dif.del4[,1:9]
+pheatmap(dif.del4,
+         color=colorRampPalette(c("blue","black","yellow"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="none",
+         border_color=NA,cluster_col = FALSE)
+```
+
+## 8.2 use heatmap to visualize genes with lower foldchange
+```{r}
+thres.wt <- dif.wt>=4
+dif.wt[thres.wt]=4
+pheatmap(dif.wt,
+         color=colorRampPalette(c("blue","black","yellow"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="none",
+         border_color=NA,cluster_col = FALSE)
+
+thres.wt2 <- dif.wt2>=4
+dif.wt2[thres.wt2]=4
+pheatmap(dif.wt2,
+         color=colorRampPalette(c("blue","black","yellow"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="none",
+         border_color=NA,cluster_col = FALSE)
+
+thres.del4 <- dif.del4>=4
+dif.del4[thres.del4]=4
+pheatmap(dif.del4,
+         color=colorRampPalette(c("blue","black","yellow"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="none",
+         border_color=NA,cluster_col = FALSE)
+```
+
+```{r}
+pdf(file="wt-4FCs-thre.pdf",width=50,height=25)
+pheatmap(dif.wt2,
+         color=colorRampPalette(c("blue","black","yellow"))(100),
+         fontsize_row=0.5,
+         fontsize_col=0.5,scale="none",
+         border_color=NA,cluster_col = FALSE)
+dev.off()
+```
+
+# 9 Compare pho80-deleted background, CHIPseq data and my 2nd-max pho4 candidates list
+## 9.1 log2(0.6)
+```{r}
+chip.data <- fread(file="../sandbox/elife-25157-fig5-data1-v2.csv", sep= ",",sep2=",",header = T)
+Rseq80.data <- fread(file="../sandbox/elife-25157-fig5-data2-v2.csv", sep= ",",sep2=",",header = T)
+my.list <- fread(file="TMM-2ndmax-log2(0.6).txt", sep= ",",sep2=",",header = T) # 188 genes
+## Compare RNAseq gene list (my list to Bin's list)
+Rseqm <- match(Rseq80.data$GeneID,my.list$genes) # 37 out of 80 genes in Bin's RNAseq list could match to my list 
+Rseqm <- sort(Rseqm)
+Rseqm1 <- my.list[Rseqm,]
+## ChIP - Bin - My
+Chipse <- match(chip.data$START,Rseq80.data$START) # 70 out of 100 Chipseq data could match to Rseq80
+Chipse <- sort(Chipse)
+Chipse1 <- Rseq80.data[Chipse,]
+comatch <- match(Chipse1$GeneID,my.list$genes) # 31 out of 70 could match to my list
+comatch <- sort(comatch)
+comatch1 <- my.list[comatch]
+## My - Bin - ChIP
+mytb <- match(my.list$genes,Rseq80.data$GeneID) # 37 genes in my list coud match to Bin's list 
+mytb <- sort(mytb)
+mytb1 <- Rseq80.data[mytb,]
+mytbtc <- match(mytb1$START,chip.data$START) # all 37 genes could match to both list
+write.table(mytb1,file="3listSub-log2(0.6).txt",sep='\t',quote=F,row.names=F)
+```
+## 9.2 log2(0.7)
+```{r}
+chip.data <- fread(file="../sandbox/elife-25157-fig5-data1-v2.csv", sep= ",",sep2=",",header = T)
+Rseq80.data <- fread(file="../sandbox/elife-25157-fig5-data2-v2.csv", sep= ",",sep2=",",header = T)
+my.list <- fread(file="TMM-2ndmax-log2(0.7).txt", sep= ",",sep2=",",header = T) # 156 genes
+## Compare RNAseq gene list (my list to Bin's list)
+Rseqm <- match(Rseq80.data$GeneID,my.list$genes) # 36 out of 80 genes in Bin's RNAseq list could match to my list 
+Rseqm <- sort(Rseqm)
+Rseqm1 <- my.list[Rseqm,]
+## ChIP - Bin - My
+Chipse <- match(chip.data$START,Rseq80.data$START) # 70 out of 100 Chipseq data could match to Rseq80
+Chipse <- sort(Chipse)
+Chipse1 <- Rseq80.data[Chipse,]
+comatch <- match(Chipse1$GeneID,my.list$genes) # 30 out of 70 could match to my list
+comatch <- sort(comatch)
+comatch1 <- my.list[comatch]
+## My - Bin - ChIP
+mytb <- match(my.list$genes,Rseq80.data$GeneID) # 36 genes in my list coud match to Bin's list 
+mytb <- sort(mytb)
+mytb1 <- Rseq80.data[mytb,]
+mytbtc <- match(mytb1$START,chip.data$START) # all 36 genes could match to both list
+write.table(mytb1,file="3listSub-log2(0.7).txt",sep='\t',quote=F,row.names=F)
+```
+## 9.3 log2(0.85)
+```{r}
+chip.data <- fread(file="../sandbox/elife-25157-fig5-data1-v2.csv", sep= ",",sep2=",",header = T)
+Rseq80.data <- fread(file="../sandbox/elife-25157-fig5-data2-v2.csv", sep= ",",sep2=",",header = T)
+my.list <- fread(file="TMM-2ndmax-log2(0.85).txt", sep= ",",sep2=",",header = T) # 156 genes
+## Compare RNAseq gene list (my list to Bin's list)
+Rseqm <- match(Rseq80.data$GeneID,my.list$genes) # 28 out of 80 genes in Bin's RNAseq list could match to my list 
+Rseqm <- sort(Rseqm)
+Rseqm1 <- my.list[Rseqm,]
+## ChIP - Bin - My
+Chipse <- match(chip.data$START,Rseq80.data$START) # 70 out of 100 Chipseq data could match to Rseq80
+Chipse <- sort(Chipse)
+Chipse1 <- Rseq80.data[Chipse,]
+comatch <- match(Chipse1$GeneID,my.list$genes) # 23 out of 70 could match to my list
+comatch <- sort(comatch)
+comatch1 <- my.list[comatch]
+## My - Bin - ChIP
+mytb <- match(my.list$genes,Rseq80.data$GeneID) # 28 genes in my list coud match to Bin's list 
+mytb <- sort(mytb)
+mytb1 <- Rseq80.data[mytb,]
+mytbtc <- match(mytb1$START,chip.data$START) # all 36 genes could match to both list
+write.table(mytb1,file="3listSub-log2(0.85).txt",sep='\t',quote=F,row.names=F)
+```
